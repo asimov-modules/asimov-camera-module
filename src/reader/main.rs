@@ -1,7 +1,7 @@
 // This is free and unencumbered software released into the public domain.
 
 #[cfg(not(feature = "std"))]
-compile_error!("asimov-template-emitter requires the 'std' feature");
+compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// asimov-template-emitter
+/// asimov-camera-reader
 #[derive(Debug, Parser)]
 struct Options {
     #[clap(flatten)]
@@ -83,6 +83,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
 
     // Build FFmpeg command
     let mut cmd = Command::new("ffmpeg");
+    let fps = fps.to_string();
     cmd.args([
         "-f",
         get_ffmpeg_format()?,
@@ -91,8 +92,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         "-video_size",
         &format!("{}x{}", width, height),
         "-framerate",
-        "30",
-        // &fps.to_string(),
+        &fps,
         "-i",
         &input_device,
         "-preset",
@@ -100,7 +100,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         "-tune",
         "zerolatency",
         "-vf",
-        "fps=30",
+        &format!("fps={}", fps),
         "-pix_fmt",
         "rgb24",
         "-f",
@@ -138,21 +138,17 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         if let Some(ref hasher) = hasher {
             // Convert raw RGB buffer to image
             let img_buffer =
-                image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, buffer.clone())
+                image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, &buffer[..].to_vec())
                     .ok_or("Failed to create image buffer")?;
             let img_data = image::DynamicImage::ImageRgb8(img_buffer);
             let hash = hasher.hash_image(&img_data);
 
-            if let Some(ref mut last_hash) = last_hash {
-                let dist = hash.dist(last_hash);
-
-                if dist < options.debounce as u32 {
-                    continue;
-                }
-
-                *last_hash = hash;
+            if let Some(ref mut prev_hash) = last_hash {
+                let dist = hash.dist(prev_hash);
+                if dist < options.debounce as u32 { continue; }
+                *prev_hash = hash;
             } else {
-                last_hash = Some(hash)
+                last_hash = Some(hash);
             };
         };
 

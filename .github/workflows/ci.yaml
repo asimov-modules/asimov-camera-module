@@ -32,6 +32,8 @@ jobs:
       pull-requests: write
     with:
       building_toolchain: 1.87.0
-      linux_dependencies: brew install ffmpeg
+      linux_dependencies: |
+        sudo apt update && sudo apt upgrade -y
+        sudo apt install -y ffmpeg
       macos_dependencies: brew install ffmpeg
-      windows_dependencies: choco install ffmpeg
+      windows_dependencies: vcpkg install ffmpeg

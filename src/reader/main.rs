@@ -137,12 +137,9 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         // Apply debouncing if enabled
         if let Some(ref hasher) = hasher {
             // Convert raw RGB buffer to image
-            let img_buffer = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
-                width,
-                height,
-                &buffer[..].to_vec(),
-            )
-            .ok_or("Failed to create image buffer")?;
+            let img_buffer =
+                image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, buffer.clone())
+                    .ok_or("Failed to create image buffer")?;
             let img_data = image::DynamicImage::ImageRgb8(img_buffer);
             let hash = hasher.hash_image(&img_data);
 

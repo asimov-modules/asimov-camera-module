@@ -11,7 +11,11 @@ use know::traits::ToJsonLd;
 use std::{
     error::Error,
     io::{self, Read, Write},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -67,12 +71,27 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
     #[cfg(feature = "tracing")]
     asimov_module::init_tracing_subscriber(&options.flags).expect("failed to initialize logging");
 
+    let quit = Arc::new(AtomicBool::new(false));
+    let child_holder: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    {
+        let quit = quit.clone();
+        let child_holder = child_holder.clone();
+        ctrlc::set_handler(move || {
+            quit.store(true, Ordering::SeqCst);
+            if let Ok(mut guard) = child_holder.lock() {
+                if let Some(child) = guard.as_mut() {
+                    let _ = child.kill();
+                }
+            }
+        })?;
+    }
+
     let input_device = get_input_device(&options.device)?;
     let (width, height) = options.size;
     let fps = options.frequency;
 
-    let mut last_emit = Instant::now();
     let min_interval = Duration::from_secs_f64(1.0 / fps);
+    let fps_s = fps.to_string();
 
     let mut last_hash: Option<image_hasher::ImageHash> = None;
     let hasher = if options.debounce > 0 {
@@ -81,62 +100,77 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         None
     };
 
-    // Build FFmpeg command
+    let mut ffargs: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-f".into(),
+        get_ffmpeg_format()?.into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-video_size".into(),
+        format!("{}x{}", width, height),
+        "-framerate".into(),
+        fps_s.clone(),
+    ];
+
+    // macOS: preselect a supported input pixel format to avoid AVFoundation pixel-format spam.
+    // logs showed `0rgb` among supported formats; pick that first.
+    #[cfg(target_os = "macos")]
+    {
+        ffargs.push("-pixel_format".into());
+        ffargs.push("0rgb".into());
+    }
+
+    ffargs.extend([
+        "-i".into(),
+        input_device.clone(),
+        "-preset".into(),
+        "veryfast".into(),
+        "-tune".into(),
+        "zerolatency".into(),
+        "-vf".into(),
+        format!("fps={}", fps_s),
+        "-pix_fmt".into(),
+        "rgb24".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "pipe:1".into(),
+    ]);
+
     let mut cmd = Command::new("ffmpeg");
-    let fps = fps.to_string();
-    cmd.args([
-        "-f",
-        get_ffmpeg_format()?,
-        "-loglevel",
-        "error",
-        "-video_size",
-        &format!("{}x{}", width, height),
-        "-framerate",
-        &fps,
-        "-i",
-        &input_device,
-        "-preset",
-        "veryfast",
-        "-tune",
-        "zerolatency",
-        "-vf",
-        &format!("fps={}", fps),
-        "-pix_fmt",
-        "rgb24",
-        "-f",
-        "rawvideo",
-        "pipe:1",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::inherit());
+    cmd.args(ffargs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn()?;
+    let child = cmd.spawn()?;
+    *child_holder.lock().unwrap() = Some(child);
+    let mut child = child_holder.lock().unwrap().take().unwrap();
+
     let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
-
     let mut reader = io::BufReader::new(stdout);
+
     let frame_size = (width * height * 3) as usize;
     let mut buffer = vec![0u8; frame_size];
 
-    let mut stdout = io::stdout().lock();
+    let mut out = io::stdout().lock();
+    let mut last_emit = Instant::now();
 
-    loop {
-        // Read frame from FFmpeg
+    while !quit.load(Ordering::SeqCst) {
         match reader.read_exact(&mut buffer) {
             Ok(_) => (),
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e.into()),
         }
+        if quit.load(Ordering::SeqCst) {
+            break;
+        }
 
-        // Check if we should emit based on frequency
         let now = Instant::now();
         if now.duration_since(last_emit) < min_interval {
             continue;
         }
         last_emit = now;
 
-        // Apply debouncing if enabled
         if let Some(ref hasher) = hasher {
-            // Convert raw RGB buffer to image
             let img_buffer =
                 image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, buffer.clone())
                     .ok_or("Failed to create image buffer")?;
@@ -167,15 +201,14 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
             source: Some(options.device.clone()),
         };
 
-        match writeln!(&mut stdout, "{}", img.to_jsonld().unwrap()) {
+        match writeln!(&mut out, "{}", img.to_jsonld().unwrap()) {
             Ok(_) => (),
             Err(err) if err.kind() == io::ErrorKind::BrokenPipe => break,
             Err(err) => return Err(err.into()),
         }
     }
 
-    child.kill().ok();
-
+    let _ = child.kill();
     Ok(EX_OK)
 }
 

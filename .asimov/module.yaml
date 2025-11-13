@@ -1,20 +1,27 @@
 # See: https://asimov-specs.github.io/module-manifest/
 ---
-name: template
-label: Template
-title: ASIMOV Template Module
-summary: Fork this to create your own module!
+name: camera
+label: Camera
+title: ASIMOV Camera Module
+summary: Capture frames from a camera via FFmpeg and emit newline-delimited JSON-LD Image objects to stdout.
 links:
-  - https://github.com/asimov-modules/asimov-template-module
-  - https://crates.io/crates/asimov-template-module
+  - https://github.com/asimov-modules/asimov-camera-module
+  - https://crates.io/crates/asimov-camera-module
 
 provides:
   programs:
-    - asimov-template-emitter
+    - asimov-camera-reader
 
 handles:
   url_protocols:
+    - file
   url_prefixes:
+    - file:/dev/video        # Linux-style device URLs
   url_patterns:
-  file_extensions:
+    - '^file:/dev/video[0-9]+$'
+    - '^[0-9]+$'
+    - '^video=.*$'
+  file_extensions: []
   content_types:
+    - application/ld+json
+    - application/json

@@ -25,9 +25,22 @@ struct Options {
     #[clap(flatten)]
     flags: StandardOptions,
 
-    /// Input camera device (e.g., "0" for /dev/video0 or device name)
-    #[arg(default_value = "file:/dev/video0")]
-    device: String,
+    /// Input camera device.
+    ///
+    /// Linux:
+    ///   "0"                 -> /dev/video0
+    ///   "file:/dev/video0"  -> /dev/video0
+    ///
+    /// macOS:
+    ///   "0"                 -> first AVFoundation camera
+    ///   "1"                 -> second camera, etc.
+    ///
+    /// Windows:
+    ///   'Integrated Camera' -> video=Integrated Camera
+    ///   'video=default'     -> video=default
+    ///
+    /// If omitted, a per-OS default is used.
+    device: Option<String>,
 
     /// Desired dimensions in WxH format (e.g. 1920x1080)
     #[arg(short, long = "size", value_parser = parse_dimensions, default_value = "640x480")]
@@ -39,8 +52,7 @@ struct Options {
 
     /// Debounce level. Repeat for stricter debouncing.
     ///
-    /// Deboucing is implemented as a similarity comparison to the previously emitted image's image
-    /// hash.
+    /// Debouncing is implemented as a similarity comparison to the previously emitted image's hash.
     #[clap(short = 'D', long, action = clap::ArgAction::Count)]
     debounce: u8,
 }
@@ -73,6 +85,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
 
     let quit = Arc::new(AtomicBool::new(false));
     let child_holder: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+
     {
         let quit = quit.clone();
         let child_holder = child_holder.clone();
@@ -86,7 +99,10 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         })?;
     }
 
-    let input_device = get_input_device(&options.device)?;
+    // Resolve device and normalize per OS:
+    let device = options.device.clone().unwrap_or_else(default_device_for_os);
+    let input_device = get_input_device(&device)?;
+
     let (width, height) = options.size;
     let fps = options.frequency;
 
@@ -135,6 +151,19 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         "rawvideo".into(),
         "pipe:1".into(),
     ]);
+
+    #[cfg(feature = "tracing")]
+    asimov_module::tracing::info!(
+        target: "asimov_camera_module::reader",
+        device = %device,
+        input_device = %input_device,
+        width = width,
+        height = height,
+        fps = fps,
+        debounce = options.debounce,
+        ffmpeg_args = ?ffargs,
+        "spawning ffmpeg"
+    );
 
     let mut cmd = Command::new("ffmpeg");
     cmd.args(ffargs)
@@ -194,14 +223,18 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
             .as_secs();
 
         let img = know::classes::Image {
-            id: Some(format!("{}#{}", &options.device, ts)),
+            id: Some(format!("{}#{}", &device, ts)),
             width: Some(width as _),
             height: Some(height as _),
             data: buffer.clone(),
-            source: Some(options.device.clone()),
+            source: Some(device.clone()),
         };
 
-        match writeln!(&mut out, "{}", img.to_jsonld().unwrap()) {
+        let json = img.to_jsonld().map_err(|e| -> Box<dyn Error> {
+            format!("failed to convert image to JSON-LD: {e}").into()
+        })?;
+
+        match writeln!(&mut out, "{json}") {
             Ok(_) => (),
             Err(err) if err.kind() == io::ErrorKind::BrokenPipe => break,
             Err(err) => return Err(err.into()),
@@ -209,7 +242,39 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
     }
 
     let _ = child.kill();
+
+    #[cfg(feature = "tracing")]
+    asimov_module::tracing::info!(
+        target: "asimov_camera_module::reader",
+        "camera reader exiting"
+    );
+
     Ok(EX_OK)
+}
+
+fn default_device_for_os() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        // First v4l2 camera
+        return "file:/dev/video0".to_string();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // First AVFoundation camera index
+        return "0".to_string();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Default dshow video device
+        return "video=default".to_string();
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        return String::from("");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -229,22 +294,37 @@ fn get_ffmpeg_format() -> Result<&'static str, Box<dyn Error>> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn get_ffmpeg_format() -> Result<&'static str, Box<dyn Error>> {
-    Err("Unsupported OS for camera input".into())
+    Err("asimov-camera-reader: unsupported OS for camera input".into())
 }
 
 fn get_input_device(device: &str) -> Result<String, Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     {
-        // On macOS, device "0" typically refers to the first camera
-        // You can list cameras with: ffmpeg -f avfoundation -list_devices true -i ""
-        Ok(device
-            .strip_prefix("file:/dev/video")
-            .unwrap_or(device)
-            .to_string())
+        // On macOS, ffmpeg avfoundation expects an index ("0", "1", "0:0", etc.).
+        //
+        // We accept:
+        //   "0"                      -> "0"
+        //   "1"                      -> "1"
+        //   "file:/dev/video1"       -> "1"
+        //   "/dev/video2"            -> "2"   (Linux-style habit, normalized)
+        //
+        if let Some(rest) = device.strip_prefix("file:/dev/video") {
+            Ok(rest.to_string())
+        } else if let Some(rest) = device.strip_prefix("/dev/video") {
+            Ok(rest.to_string())
+        } else {
+            Ok(device.to_string())
+        }
     }
 
     #[cfg(target_os = "linux")]
     {
+        // v4l2: typically /dev/videoN
+        //
+        // Accepted:
+        //   "0"                 -> /dev/video0
+        //   "file:/dev/video0"  -> /dev/video0
+        //   "/dev/video2"       -> /dev/video2
         if device.chars().all(|c| c.is_numeric()) {
             Ok(format!("/dev/video{}", device))
         } else {
@@ -254,7 +334,21 @@ fn get_input_device(device: &str) -> Result<String, Box<dyn Error>> {
 
     #[cfg(target_os = "windows")]
     {
-        Ok(device.to_string())
+        // dshow: expects something like:
+        //   video="Integrated Camera"
+        //   video=default
+        //
+        // We normalize inputs:
+        //   - if it already starts with "video=" -> use as is
+        //   - if "default" (any case)          -> video=default
+        //   - otherwise                         -> video=<device>
+        if device.to_lowercase().starts_with("video=") {
+            Ok(device.to_string())
+        } else if device.eq_ignore_ascii_case("default") {
+            Ok("video=default".to_string())
+        } else {
+            Ok(format!("video={}", device))
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

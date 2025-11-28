@@ -18,24 +18,25 @@ publish = false
 
 [features]
 default = ["all", "cli", "std"]
-all = ["pretty", "tracing"]
+all = ["ffmpeg", "pretty", "tracing"]
 cli = ["asimov-module/cli", "std", "dep:clap", "dep:clientele"]
 std = ["asimov-module/std", "clap?/std", "clientele?/std"]
 unstable = []
 
 # Optional features:
+ffmpeg = []
 pretty = []
 tracing = ["asimov-module/tracing", "clientele?/tracing"]
 
 [dependencies]
-asimov-module = { version = "25.0.0-dev.21", default-features = false }
+asimov-module = { version = "25", default-features = false }
 ctrlc = "3.5"
 image = "0.25"
 image_hasher = { version = "3.0", features = ["fast_image_resize"] }
 know = { version = "0.2.11", features = ["serde"] }
 nokhwa = { version = "0.10", features = ["input-native"] }
 serde_json = "1.0"
-thiserror = "2.0.17"
+thiserror = "2.0"
 
 # Optional integrations:
 clap = { version = "4.5", default-features = false, features = [

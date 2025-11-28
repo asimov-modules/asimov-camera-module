@@ -3,7 +3,10 @@
 #[cfg(not(feature = "std"))]
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
-use asimov_camera_module::core::{self, Error, Result as CoreResult};
+use asimov_camera_module::{
+    core::{self, Error, Result as CoreResult},
+    shared::drivers::ffmpeg::{self, FfmpegConfig},
+};
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
 use clientele::StandardOptions;
@@ -12,7 +15,7 @@ use know::traits::ToJsonLd;
 use std::{
     error::Error as StdError,
     io::{self, Read, Write},
-    process::{Child, Command, Stdio},
+    process::Child,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -100,12 +103,10 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
         .map_err(|e| Error::Other(format!("failed to install Ctrl+C handler: {e}")))?;
     }
 
-    let input_device = get_input_device(&opts.device);
     let (width, height) = opts.size;
     let fps = opts.frequency;
 
     let min_interval = Duration::from_secs_f64(1.0 / fps);
-    let fps_s = fps.to_string();
 
     let mut last_hash: Option<image_hasher::ImageHash> = None;
     let hasher = if opts.debounce > 0 {
@@ -114,59 +115,9 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
         None
     };
 
-    let mut ffargs: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-f".into(),
-        ffmpeg_format().into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-video_size".into(),
-        format!("{}x{}", width, height),
-        "-framerate".into(),
-        fps_s.clone(),
-    ];
+    let cfg = FfmpegConfig::new(opts.device.clone(), width, height, fps);
 
-    // macOS: preselect a supported input pixel format to avoid AVFoundation spam.
-    #[cfg(target_os = "macos")]
-    {
-        ffargs.push("-pixel_format".into());
-        ffargs.push("0rgb".into());
-    }
-
-    ffargs.extend([
-        "-i".into(),
-        input_device.clone(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-tune".into(),
-        "zerolatency".into(),
-        "-vf".into(),
-        format!("fps={}", fps_s),
-        "-pix_fmt".into(),
-        "rgb24".into(),
-        "-f".into(),
-        "rawvideo".into(),
-        "pipe:1".into(),
-    ]);
-
-    #[cfg(feature = "tracing")]
-    asimov_module::tracing::debug!(
-        target: "asimov_camera_module::reader",
-        device = %input_device,
-        width = width,
-        height = height,
-        fps = fps,
-        "spawning ffmpeg"
-    );
-
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(&ffargs)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| Error::FfmpegSpawn(format!("failed to spawn ffmpeg: {e}")))?;
+    let child = ffmpeg::spawn_reader(&cfg)?;
     *child_holder
         .lock()
         .map_err(|_| Error::Other("failed to lock child holder".into()))? = Some(child);
@@ -269,48 +220,6 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
     );
 
     Ok(())
-}
-
-// Only macOS / Linux / Windows are supported.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-compile_error!("asimov-camera-reader currently supports only macOS, Linux and Windows.");
-
-#[cfg(target_os = "macos")]
-fn ffmpeg_format() -> &'static str {
-    "avfoundation"
-}
-
-#[cfg(target_os = "linux")]
-fn ffmpeg_format() -> &'static str {
-    "v4l2"
-}
-
-#[cfg(target_os = "windows")]
-fn ffmpeg_format() -> &'static str {
-    "dshow"
-}
-
-#[cfg(target_os = "macos")]
-fn get_input_device(device: &str) -> String {
-    device
-        .strip_prefix("file:/dev/video")
-        .unwrap_or(device)
-        .to_string()
-}
-
-#[cfg(target_os = "linux")]
-fn get_input_device(device: &str) -> String {
-    if device.chars().all(|c| c.is_ascii_digit()) {
-        format!("/dev/video{device}")
-    } else {
-        device.strip_prefix("file:").unwrap_or(device).to_string()
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn get_input_device(device: &str) -> String {
-    // For dshow we pass through the string as-is (friendly name or index).
-    device.to_string()
 }
 
 /// Accepts "1920x1080", "1920×1080", with optional spaces. Validates reasonable ranges.

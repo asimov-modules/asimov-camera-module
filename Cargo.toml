@@ -33,6 +33,9 @@ ctrlc = "3.5"
 image = "0.25"
 image_hasher = { version = "3.0", features = ["fast_image_resize"] }
 know = { version = "0.2.11", features = ["serde"] }
+nokhwa = { version = "0.10", features = ["input-native"] }
+serde_json = "1.0"
+thiserror = "2.0.17"
 
 # Optional integrations:
 clap = { version = "4.5", default-features = false, features = [
@@ -51,4 +54,9 @@ lto = "thin"
 [[bin]]
 name = "asimov-camera-reader"
 path = "src/reader/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "asimov-camera-cataloger"
+path = "src/cataloger/main.rs"
 required-features = ["cli"]

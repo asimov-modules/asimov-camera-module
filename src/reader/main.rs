@@ -3,13 +3,14 @@
 #[cfg(not(feature = "std"))]
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
+use asimov_camera_module::core::{self, Error, Result as CoreResult};
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
 use clientele::StandardOptions;
 use image_hasher::{HashAlg, HasherConfig};
 use know::traits::ToJsonLd;
 use std::{
-    error::Error,
+    error::Error as StdError,
     io::{self, Read, Write},
     process::{Child, Command, Stdio},
     sync::{
@@ -25,22 +26,9 @@ struct Options {
     #[clap(flatten)]
     flags: StandardOptions,
 
-    /// Input camera device.
-    ///
-    /// Linux:
-    ///   "0"                 -> /dev/video0
-    ///   "file:/dev/video0"  -> /dev/video0
-    ///
-    /// macOS:
-    ///   "0"                 -> first AVFoundation camera
-    ///   "1"                 -> second camera, etc.
-    ///
-    /// Windows:
-    ///   'Integrated Camera' -> video=Integrated Camera
-    ///   'video=default'     -> video=default
-    ///
-    /// If omitted, a per-OS default is used.
-    device: Option<String>,
+    /// Input camera device (e.g., "0" for /dev/video0 or device name)
+    #[arg(default_value = "file:/dev/video0")]
+    device: String,
 
     /// Desired dimensions in WxH format (e.g. 1920x1080)
     #[arg(short, long = "size", value_parser = parse_dimensions, default_value = "640x480")]
@@ -52,12 +40,13 @@ struct Options {
 
     /// Debounce level. Repeat for stricter debouncing.
     ///
-    /// Debouncing is implemented as a similarity comparison to the previously emitted image's hash.
+    /// Debouncing is implemented as a similarity comparison to the previously
+    /// emitted image's perceptual hash.
     #[clap(short = 'D', long, action = clap::ArgAction::Count)]
     debounce: u8,
 }
 
-pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
+pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
     // Load environment variables from `.env`:
     asimov_module::dotenv().ok();
 
@@ -83,6 +72,17 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
     #[cfg(feature = "tracing")]
     asimov_module::init_tracing_subscriber(&options.flags).expect("failed to initialize logging");
 
+    let exit_code = match run_reader(&options) {
+        Ok(()) => EX_OK,
+        Err(err) => core::handle_error(&err, &options.flags),
+    };
+
+    Ok(exit_code)
+}
+
+fn run_reader(opts: &Options) -> CoreResult<()> {
+    core::info_user(&opts.flags, "starting camera reader");
+
     let quit = Arc::new(AtomicBool::new(false));
     let child_holder: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
 
@@ -96,21 +96,19 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
                     let _ = child.kill();
                 }
             }
-        })?;
+        })
+        .map_err(|e| Error::Other(format!("failed to install Ctrl+C handler: {e}")))?;
     }
 
-    // Resolve device and normalize per OS:
-    let device = options.device.clone().unwrap_or_else(default_device_for_os);
-    let input_device = get_input_device(&device)?;
-
-    let (width, height) = options.size;
-    let fps = options.frequency;
+    let input_device = get_input_device(&opts.device);
+    let (width, height) = opts.size;
+    let fps = opts.frequency;
 
     let min_interval = Duration::from_secs_f64(1.0 / fps);
     let fps_s = fps.to_string();
 
     let mut last_hash: Option<image_hasher::ImageHash> = None;
-    let hasher = if options.debounce > 0 {
+    let hasher = if opts.debounce > 0 {
         Some(HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher())
     } else {
         None
@@ -119,7 +117,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
     let mut ffargs: Vec<String> = vec![
         "-hide_banner".into(),
         "-f".into(),
-        get_ffmpeg_format()?.into(),
+        ffmpeg_format().into(),
         "-loglevel".into(),
         "error".into(),
         "-video_size".into(),
@@ -128,8 +126,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         fps_s.clone(),
     ];
 
-    // macOS: preselect a supported input pixel format to avoid AVFoundation pixel-format spam.
-    // logs showed `0rgb` among supported formats; pick that first.
+    // macOS: preselect a supported input pixel format to avoid AVFoundation spam.
     #[cfg(target_os = "macos")]
     {
         ffargs.push("-pixel_format".into());
@@ -153,28 +150,37 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
     ]);
 
     #[cfg(feature = "tracing")]
-    asimov_module::tracing::info!(
+    asimov_module::tracing::debug!(
         target: "asimov_camera_module::reader",
-        device = %device,
-        input_device = %input_device,
+        device = %input_device,
         width = width,
         height = height,
         fps = fps,
-        debounce = options.debounce,
-        ffmpeg_args = ?ffargs,
         "spawning ffmpeg"
     );
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(ffargs)
+    cmd.args(&ffargs)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
-    let child = cmd.spawn()?;
-    *child_holder.lock().unwrap() = Some(child);
-    let mut child = child_holder.lock().unwrap().take().unwrap();
+    let child = cmd
+        .spawn()
+        .map_err(|e| Error::FfmpegSpawn(format!("failed to spawn ffmpeg: {e}")))?;
+    *child_holder
+        .lock()
+        .map_err(|_| Error::Other("failed to lock child holder".into()))? = Some(child);
 
-    let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
+    let mut child = child_holder
+        .lock()
+        .map_err(|_| Error::Other("failed to lock child holder".into()))?
+        .take()
+        .ok_or_else(|| Error::Other("ffmpeg child missing from holder".into()))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Other("failed to open ffmpeg stdout".into()))?;
     let mut reader = io::BufReader::new(stdout);
 
     let frame_size = (width * height * 3) as usize;
@@ -185,10 +191,16 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
 
     while !quit.load(Ordering::SeqCst) {
         match reader.read_exact(&mut buffer) {
-            Ok(_) => (),
+            Ok(_) => {},
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(Error::Io {
+                    context: "reading ffmpeg output",
+                    source: e,
+                });
+            },
         }
+
         if quit.load(Ordering::SeqCst) {
             break;
         }
@@ -202,42 +214,49 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         if let Some(ref hasher) = hasher {
             let img_buffer =
                 image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, buffer.clone())
-                    .ok_or("Failed to create image buffer")?;
+                    .ok_or_else(|| {
+                        Error::InvalidFrameSize(format!(
+                            "failed to create image buffer {width}x{height}"
+                        ))
+                    })?;
             let img_data = image::DynamicImage::ImageRgb8(img_buffer);
             let hash = hasher.hash_image(&img_data);
 
             if let Some(ref mut prev_hash) = last_hash {
                 let dist = hash.dist(prev_hash);
-                if dist < options.debounce as u32 {
+                if dist < opts.debounce as u32 {
                     continue;
                 }
                 *prev_hash = hash;
             } else {
                 last_hash = Some(hash);
-            };
-        };
+            }
+        }
 
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs();
 
         let img = know::classes::Image {
-            id: Some(format!("{}#{}", &device, ts)),
+            id: Some(format!("{}#{}", &opts.device, ts)),
             width: Some(width as _),
             height: Some(height as _),
             data: buffer.clone(),
-            source: Some(device.clone()),
+            source: Some(opts.device.clone()),
         };
 
-        let json = img.to_jsonld().map_err(|e| -> Box<dyn Error> {
-            format!("failed to convert image to JSON-LD: {e}").into()
-        })?;
+        let json = img.to_jsonld().map_err(|e| Error::JsonLd(e.to_string()))?;
 
         match writeln!(&mut out, "{json}") {
-            Ok(_) => (),
+            Ok(_) => {},
             Err(err) if err.kind() == io::ErrorKind::BrokenPipe => break,
-            Err(err) => return Err(err.into()),
+            Err(err) => {
+                return Err(Error::Io {
+                    context: "writing JSON output",
+                    source: err,
+                });
+            },
         }
     }
 
@@ -249,118 +268,57 @@ pub fn main() -> Result<SysexitsError, Box<dyn Error>> {
         "camera reader exiting"
     );
 
-    Ok(EX_OK)
+    Ok(())
 }
 
-fn default_device_for_os() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        // First v4l2 camera
-        return "file:/dev/video0".to_string();
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // First AVFoundation camera index
-        return "0".to_string();
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Default dshow video device
-        return "video=default".to_string();
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        return String::from("");
-    }
-}
+// Only macOS / Linux / Windows are supported.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+compile_error!("asimov-camera-reader currently supports only macOS, Linux and Windows.");
 
 #[cfg(target_os = "macos")]
-fn get_ffmpeg_format() -> Result<&'static str, Box<dyn Error>> {
-    Ok("avfoundation")
+fn ffmpeg_format() -> &'static str {
+    "avfoundation"
 }
 
 #[cfg(target_os = "linux")]
-fn get_ffmpeg_format() -> Result<&'static str, Box<dyn Error>> {
-    Ok("v4l2")
+fn ffmpeg_format() -> &'static str {
+    "v4l2"
 }
 
 #[cfg(target_os = "windows")]
-fn get_ffmpeg_format() -> Result<&'static str, Box<dyn Error>> {
-    Ok("dshow")
+fn ffmpeg_format() -> &'static str {
+    "dshow"
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn get_ffmpeg_format() -> Result<&'static str, Box<dyn Error>> {
-    Err("asimov-camera-reader: unsupported OS for camera input".into())
+#[cfg(target_os = "macos")]
+fn get_input_device(device: &str) -> String {
+    device
+        .strip_prefix("file:/dev/video")
+        .unwrap_or(device)
+        .to_string()
 }
 
-fn get_input_device(device: &str) -> Result<String, Box<dyn Error>> {
-    #[cfg(target_os = "macos")]
-    {
-        // On macOS, ffmpeg avfoundation expects an index ("0", "1", "0:0", etc.).
-        //
-        // We accept:
-        //   "0"                      -> "0"
-        //   "1"                      -> "1"
-        //   "file:/dev/video1"       -> "1"
-        //   "/dev/video2"            -> "2"   (Linux-style habit, normalized)
-        //
-        if let Some(rest) = device.strip_prefix("file:/dev/video") {
-            Ok(rest.to_string())
-        } else if let Some(rest) = device.strip_prefix("/dev/video") {
-            Ok(rest.to_string())
-        } else {
-            Ok(device.to_string())
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // v4l2: typically /dev/videoN
-        //
-        // Accepted:
-        //   "0"                 -> /dev/video0
-        //   "file:/dev/video0"  -> /dev/video0
-        //   "/dev/video2"       -> /dev/video2
-        if device.chars().all(|c| c.is_numeric()) {
-            Ok(format!("/dev/video{}", device))
-        } else {
-            Ok(device.strip_prefix("file:").unwrap_or(device).to_string())
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // dshow: expects something like:
-        //   video="Integrated Camera"
-        //   video=default
-        //
-        // We normalize inputs:
-        //   - if it already starts with "video=" -> use as is
-        //   - if "default" (any case)          -> video=default
-        //   - otherwise                         -> video=<device>
-        if device.to_lowercase().starts_with("video=") {
-            Ok(device.to_string())
-        } else if device.eq_ignore_ascii_case("default") {
-            Ok("video=default".to_string())
-        } else {
-            Ok(format!("video={}", device))
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        Err("Unsupported OS".into())
+#[cfg(target_os = "linux")]
+fn get_input_device(device: &str) -> String {
+    if device.chars().all(|c| c.is_ascii_digit()) {
+        format!("/dev/video{device}")
+    } else {
+        device.strip_prefix("file:").unwrap_or(device).to_string()
     }
 }
 
+#[cfg(target_os = "windows")]
+fn get_input_device(device: &str) -> String {
+    // For dshow we pass through the string as-is (friendly name or index).
+    device.to_string()
+}
+
+/// Accepts "1920x1080", "1920×1080", with optional spaces. Validates reasonable ranges.
 fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
-    let parts: Vec<&str> = s.split('x').collect();
-    if parts.len() != 2 {
-        return Err(format!("Invalid format '{}'. Use WxH (e.g., 1920x1080)", s));
+    let s = s.trim().replace('×', "x");
+    let parts: Vec<&str> = s.split('x').map(|t| t.trim()).collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(format!("Invalid format '{s}'. Use WxH (e.g., 1920x1080)"));
     }
 
     let width: u32 = parts[0]
@@ -370,16 +328,14 @@ fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
         .parse()
         .map_err(|_| format!("Invalid height: {}", parts[1]))?;
 
-    if width < 160 || width > 7680 {
+    if !(160..=7680).contains(&width) {
         return Err(format!(
-            "Width {} is out of reasonable range (160-7680)",
-            width
+            "Width {width} is out of reasonable range (160-7680)"
         ));
     }
-    if height < 120 || height > 4320 {
+    if !(120..=4320).contains(&height) {
         return Err(format!(
-            "Height {} is out of reasonable range (120-4320)",
-            height
+            "Height {height} is out of reasonable range (120-4320)"
         ));
     }
 
@@ -387,21 +343,19 @@ fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
 }
 
 fn parse_frequency(s: &str) -> Result<f64, String> {
-    let freq: f64 = s.parse().map_err(|_| format!("Invalid frequency: {}", s))?;
+    let freq: f64 = s.parse().map_err(|_| format!("Invalid frequency: {s}"))?;
 
     if freq <= 0.0 {
         return Err("Frequency must be positive".to_string());
     }
     if freq > 240.0 {
         return Err(format!(
-            "Frequency {} Hz exceeds reasonable maximum (240 Hz)",
-            freq
+            "Frequency {freq} Hz exceeds reasonable maximum (240 Hz)"
         ));
     }
     if freq < 0.1 {
         return Err(format!(
-            "Frequency {} Hz is below reasonable minimum (0.1 Hz)",
-            freq
+            "Frequency {freq} Hz is below reasonable minimum (0.1 Hz)"
         ));
     }
 

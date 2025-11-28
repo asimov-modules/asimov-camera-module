@@ -31,7 +31,7 @@ jobs:
       contents: read
       pull-requests: write
     with:
-      building_toolchain: 1.87.0
+      building_toolchain: 1.88.0
       linux_dependencies: |
         sudo apt update && sudo apt upgrade -y
         sudo apt install -y ffmpeg

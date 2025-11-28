@@ -17,7 +17,7 @@ jobs:
       packages: write
     secrets: inherit
     with:
-      rust_toolchain: 1.87.0
+      rust_toolchain: 1.88.0
       update_homebrew_tap: true
       update_scoop_bucket: true
       tweet_release: true

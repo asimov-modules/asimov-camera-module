@@ -3,7 +3,7 @@
 name: camera
 label: Camera
 title: ASIMOV Camera Module
-summary: Capture frames from a camera via FFmpeg and emit newline-delimited JSON-LD Image objects to stdout.
+summary: Capture frames from a camera via FFmpeg and emit newline-delimited JSON-LD Image objects, and enumerate available camera devices and formats.
 links:
   - https://github.com/asimov-modules/asimov-camera-module
   - https://crates.io/crates/asimov-camera-module
@@ -11,6 +11,7 @@ links:
 provides:
   programs:
     - asimov-camera-reader
+    - asimov-camera-cataloger
 
 handles:
   url_protocols:
@@ -18,9 +19,9 @@ handles:
   url_prefixes:
     - file:/dev/video        # Linux-style device URLs
   url_patterns:
-    - '^file:/dev/video[0-9]+$'
-    - '^[0-9]+$'
-    - '^video=.*$'
+    - '^file:/dev/video[0-9]+$'  # Linux /dev/videoN
+    - '^[0-9]+$'                 # Bare numeric indices (macOS, Linux)
+    - '^video=.*$'               # dshow-style names on Windows (e.g. "video=Integrated Camera")
   file_extensions: []
   content_types:
     - application/ld+json

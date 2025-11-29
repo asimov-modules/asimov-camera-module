@@ -1,7 +1,7 @@
 // This is free and unencumbered software released into the public domain.
 
 /// Configuration for camera drivers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CameraConfig {
     pub device: String,
     pub width: u32,

@@ -5,7 +5,7 @@ compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
     core::{self, Error, Result as CoreResult},
-    shared::{CameraConfig, drivers::ffmpeg},
+    shared::{CameraConfig, drivers::ffmpeg, open_camera},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;

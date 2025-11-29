@@ -1,6 +1,6 @@
 // This is free and unencumbered software released into the public domain.
 
-#![forbid(unsafe_code)]
+extern crate alloc;
 
 pub mod core;
 pub mod shared;

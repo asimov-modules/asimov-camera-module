@@ -2,7 +2,7 @@
 
 use super::{CameraConfig, CameraDriver, CameraError};
 
-pub fn open(
+pub fn open_camera(
     _input_url: impl AsRef<str>,
     config: CameraConfig,
 ) -> Result<Box<dyn CameraDriver>, CameraError> {
@@ -10,6 +10,7 @@ pub fn open(
         #[cfg(feature = "ffmpeg")]
         return Ok(Box::new(super::drivers::ffmpeg::FfmpegCameraDriver {
             config,
+            process: None,
         }));
     }
     if cfg!(any(target_os = "ios", target_os = "macos")) {

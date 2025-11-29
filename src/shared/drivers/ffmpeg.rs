@@ -4,15 +4,28 @@
 compile_error!("FFmpeg camera driver currently supports only macOS, Linux and Windows.");
 
 use crate::core::{Error, Result};
-use crate::shared::{CameraConfig, CameraDriver};
+use crate::shared::{CameraConfig, CameraDriver, CameraError};
+use alloc::borrow::Cow;
 use std::process::{Child, Command, Stdio};
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Default)]
 pub struct FfmpegCameraDriver {
     pub config: CameraConfig,
+    pub process: Option<Child>,
 }
 
-impl CameraDriver for FfmpegCameraDriver {}
+impl dogma::Named for FfmpegCameraDriver {
+    fn name(&self) -> Cow<'_, str> {
+        "ffmpeg".into()
+    }
+}
+
+impl CameraDriver for FfmpegCameraDriver {
+    fn start(&mut self) -> Result<(), CameraError> {
+        self.process = spawn_reader(&self.config).ok();
+        Ok(())
+    }
+}
 
 /// Spawn FFmpeg configured to read raw RGB frames from the camera and write them to stdout.
 ///

@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-use asimov_module::SysexitsError::{self, *};
-use clientele::StandardOptions;
 use std::error::Error as StdError;
 use thiserror::Error;
 
@@ -46,7 +44,14 @@ pub fn err_msg<M: Into<String>>(m: M) -> Box<dyn StdError> {
     m.into().into()
 }
 
+#[cfg(feature = "cli")]
+use asimov_module::SysexitsError::{self, *};
+
+#[cfg(feature = "cli")]
+use clientele::StandardOptions;
+
 /// Handle a fatal error: log, print and map to an appropriate `SysexitsError`.
+#[cfg(feature = "cli")]
 pub fn handle_error(err: &Error, flags: &StandardOptions) -> SysexitsError {
     #[cfg(feature = "tracing")]
     {
@@ -67,10 +72,7 @@ pub fn handle_error(err: &Error, flags: &StandardOptions) -> SysexitsError {
 }
 
 /// Log an informational message for the user and via tracing.
-///
-/// Stderr behavior:
-///   - verbose >= 1 or debug: prints `INFO: msg`
-///   - verbose == 0 and no debug: no stderr output
+#[cfg(feature = "cli")]
 pub fn info_user(flags: &StandardOptions, msg: &str) {
     if flags.debug || flags.verbose >= 1 {
         eprintln!("INFO: {msg}");
@@ -81,10 +83,7 @@ pub fn info_user(flags: &StandardOptions, msg: &str) {
 }
 
 /// Log a warning message for the user and via tracing (no attached error).
-///
-/// Stderr behavior:
-///   - verbose >= 1 or debug: prints `WARN: msg`
-///   - verbose == 0 and no debug: no stderr output
+#[cfg(feature = "cli")]
 pub fn warn_user(flags: &StandardOptions, msg: &str) {
     if flags.debug || flags.verbose >= 1 {
         eprintln!("WARN: {msg}");
@@ -95,11 +94,7 @@ pub fn warn_user(flags: &StandardOptions, msg: &str) {
 }
 
 /// Log a warning with error context for the user and via tracing.
-///
-/// Stderr behavior:
-///   - verbose == 0: no stderr output
-///   - verbose == 1: `WARN: msg`
-///   - verbose >= 2 or debug: `WARN: msg: error`
+#[cfg(feature = "cli")]
 pub fn warn_user_with_error(flags: &StandardOptions, msg: &str, error: &dyn StdError) {
     if flags.debug || flags.verbose >= 2 {
         eprintln!("WARN: {msg}: {error}");
@@ -115,6 +110,7 @@ pub fn warn_user_with_error(flags: &StandardOptions, msg: &str, error: &dyn StdE
     );
 }
 
+#[cfg(feature = "cli")]
 fn report_error(err: &Error, flags: &StandardOptions) {
     use std::io::Write;
 
@@ -130,6 +126,7 @@ fn report_error(err: &Error, flags: &StandardOptions) {
     }
 }
 
+#[cfg(feature = "cli")]
 fn map_error_to_sysexit(err: &Error) -> SysexitsError {
     match err {
         Error::Io { .. } | Error::IoPlain(_) => EX_IOERR,

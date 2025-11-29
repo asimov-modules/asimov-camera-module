@@ -29,7 +29,7 @@ pretty = []
 tracing = ["asimov-module/tracing", "clientele?/tracing"]
 
 [dependencies]
-asimov-module = { version = "25", default-features = false }
+asimov-module = { version = "25", default-features = false, features = ["std"] }
 ctrlc = "3.5"
 derive_more = { version = "2", features = ["display", "error", "from"] }
 image = "0.25"
@@ -56,7 +56,7 @@ lto = "thin"
 [[bin]]
 name = "asimov-camera-reader"
 path = "src/reader/main.rs"
-required-features = ["cli"]
+required-features = ["cli", "ffmpeg"]
 
 [[bin]]
 name = "asimov-camera-cataloger"

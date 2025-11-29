@@ -1,5 +1,8 @@
 // This is free and unencumbered software released into the public domain.
 
+mod driver;
+pub use driver::*;
+
 pub mod drivers {
     #[cfg(feature = "ffmpeg")]
     pub mod ffmpeg;
@@ -18,4 +21,4 @@ pub mod drivers {
 }
 
 mod error;
-use error::*;
+pub use error::*;

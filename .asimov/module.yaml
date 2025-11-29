@@ -14,15 +14,10 @@ provides:
     - asimov-camera-cataloger
 
 handles:
-  url_protocols:
-    - file
-  url_prefixes:
-    - file:/dev/video        # Linux-style device URLs
   url_patterns:
-    - '^file:/dev/video[0-9]+$'  # Linux /dev/videoN
-    - '^[0-9]+$'                 # Bare numeric indices (macOS, Linux)
-    - '^video=.*$'               # dshow-style names on Windows (e.g. "video=Integrated Camera")
-  file_extensions: []
-  content_types:
-    - application/ld+json
-    - application/json
+    - file:/dev/video0
+    - file:/dev/video1
+    - file:/dev/video2
+    - file:/dev/video3
+    - file:/dev/video4
+    - file:/dev/video5

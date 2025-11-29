@@ -4,5 +4,6 @@ use derive_more::{Display, Error, From};
 
 #[derive(Clone, Debug, Display, Error, From)]
 pub enum CameraError {
+    NoDriver,
     NoCamera,
 }

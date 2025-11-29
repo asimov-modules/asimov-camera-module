@@ -16,3 +16,6 @@ pub mod drivers {
     #[cfg(all(not(feature = "ffmpeg"), target_os = "linux"))]
     pub mod v4l2;
 }
+
+mod error;
+use error::*;

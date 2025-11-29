@@ -4,7 +4,13 @@
 compile_error!("FFmpeg camera driver currently supports only macOS, Linux and Windows.");
 
 use crate::core::{Error, Result};
+use crate::shared::CameraDriver;
 use std::process::{Child, Command, Stdio};
+
+#[derive(Clone, Debug)]
+pub struct FfmpegCameraDriver {}
+
+impl CameraDriver for FfmpegCameraDriver {}
 
 /// Configuration for spawning the FFmpeg camera reader.
 #[derive(Debug, Clone)]

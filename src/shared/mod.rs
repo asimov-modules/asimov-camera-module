@@ -7,16 +7,16 @@ pub mod drivers {
     #[cfg(feature = "ffmpeg")]
     pub mod ffmpeg;
 
-    #[cfg(all(not(feature = "ffmpeg"), any(target_os = "macos", target_os = "ios")))]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     pub mod avfoundation;
 
-    #[cfg(all(not(feature = "ffmpeg"), target_os = "android"))]
+    #[cfg(target_os = "android")]
     pub mod camera2;
 
-    #[cfg(all(not(feature = "ffmpeg"), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     pub mod dshow;
 
-    #[cfg(all(not(feature = "ffmpeg"), target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     pub mod v4l2;
 }
 

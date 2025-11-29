@@ -5,7 +5,7 @@ compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
     core::{self, Error, Result as CoreResult},
-    shared::drivers::ffmpeg::{self, FfmpegConfig},
+    shared::{CameraConfig, drivers::ffmpeg},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -115,9 +115,9 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
         None
     };
 
-    let cfg = FfmpegConfig::new(opts.device.clone(), width, height, fps);
+    let config = CameraConfig::new(opts.device.clone(), width, height, fps);
 
-    let child = ffmpeg::spawn_reader(&cfg)?;
+    let child = ffmpeg::spawn_reader(&config)?;
     *child_holder
         .lock()
         .map_err(|_| Error::Other("failed to lock child holder".into()))? = Some(child);

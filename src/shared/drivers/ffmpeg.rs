@@ -4,7 +4,7 @@
 compile_error!("FFmpeg camera driver currently supports only macOS, Linux and Windows.");
 
 use crate::core::{Error, Result};
-use crate::shared::CameraDriver;
+use crate::shared::{CameraConfig, CameraDriver};
 use std::process::{Child, Command, Stdio};
 
 #[derive(Clone, Debug)]
@@ -12,35 +12,15 @@ pub struct FfmpegCameraDriver {}
 
 impl CameraDriver for FfmpegCameraDriver {}
 
-/// Configuration for spawning the FFmpeg camera reader.
-#[derive(Debug, Clone)]
-pub struct FfmpegConfig {
-    pub device: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: f64,
-}
-
-impl FfmpegConfig {
-    pub fn new(device: String, width: u32, height: u32, fps: f64) -> Self {
-        Self {
-            device,
-            width,
-            height,
-            fps,
-        }
-    }
-}
-
 /// Spawn FFmpeg configured to read raw RGB frames from the camera and write them to stdout.
 ///
 /// The child process is configured to:
 ///   - use platform-specific input format (`ffmpeg_format()`)
 ///   - use the correct input device mapping (`get_input_device`)
 ///   - output `rgb24` rawvideo frames to `pipe:1`
-pub fn spawn_reader(cfg: &FfmpegConfig) -> Result<Child> {
-    let input_device = get_input_device(&cfg.device);
-    let fps_s = cfg.fps.to_string();
+pub fn spawn_reader(config: &CameraConfig) -> Result<Child> {
+    let input_device = get_input_device(&config.device);
+    let fps_s = config.fps.to_string();
 
     let mut ffargs: Vec<String> = vec![
         "-hide_banner".into(),
@@ -49,7 +29,7 @@ pub fn spawn_reader(cfg: &FfmpegConfig) -> Result<Child> {
         "-loglevel".into(),
         "error".into(),
         "-video_size".into(),
-        format!("{}x{}", cfg.width, cfg.height),
+        format!("{}x{}", config.width, config.height),
         "-framerate".into(),
         fps_s.clone(),
     ];
@@ -80,9 +60,9 @@ pub fn spawn_reader(cfg: &FfmpegConfig) -> Result<Child> {
     asimov_module::tracing::debug!(
         target: "asimov_camera_module::driver::ffmpeg",
         device = %input_device,
-        width = cfg.width,
-        height = cfg.height,
-        fps = cfg.fps,
+        width = config.width,
+        height = config.height,
+        fps = config.fps,
         "spawning ffmpeg"
     );
 

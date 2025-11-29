@@ -1,5 +1,8 @@
 // This is free and unencumbered software released into the public domain.
 
+mod config;
+pub use config::*;
+
 mod driver;
 pub use driver::*;
 

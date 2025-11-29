@@ -8,7 +8,9 @@ use crate::shared::{CameraConfig, CameraDriver};
 use std::process::{Child, Command, Stdio};
 
 #[derive(Clone, Debug)]
-pub struct FfmpegCameraDriver {}
+pub struct FfmpegCameraDriver {
+    pub config: CameraConfig,
+}
 
 impl CameraDriver for FfmpegCameraDriver {}
 

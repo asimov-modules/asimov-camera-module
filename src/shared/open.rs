@@ -14,18 +14,18 @@ pub fn open_camera(
         }));
     }
 
+    if cfg!(target_os = "android") {
+        #[cfg(target_os = "android")]
+        return Ok(Box::new(
+            super::drivers::android::AndroidCameraDriver::open(input_url, config)?,
+        ));
+    }
+
     if cfg!(any(target_os = "ios", target_os = "macos")) {
         #[cfg(any(target_os = "ios", target_os = "macos"))]
         return Ok(Box::new(super::drivers::avf::AvfCameraDriver::open(
             input_url, config,
         )?));
-    }
-
-    if cfg!(target_os = "android") {
-        #[cfg(target_os = "android")]
-        return Ok(Box::new(
-            super::drivers::camera2::Camera2CameraDriver::open(input_url, config)?,
-        ));
     }
 
     if cfg!(target_os = "windows") {

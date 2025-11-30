@@ -23,9 +23,9 @@ pub fn open_camera(
 
     if cfg!(target_os = "android") {
         #[cfg(target_os = "android")]
-        return Ok(Box::new(super::drivers::camera2::Camera2CameraDriver {
-            config,
-        }));
+        return Ok(Box::new(
+            super::drivers::camera2::Camera2CameraDriver::open(input_url, config)?,
+        ));
     }
 
     if cfg!(target_os = "windows") {
@@ -40,5 +40,6 @@ pub fn open_camera(
         return Ok(Box::new(super::drivers::v4l2::V4l2CameraDriver { config }));
     }
 
+    #[allow(unreachable_code)]
     Err(CameraError::NoDriver)
 }

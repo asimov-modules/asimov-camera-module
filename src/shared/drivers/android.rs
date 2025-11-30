@@ -1,11 +1,12 @@
 // This is free and unencumbered software released into the public domain.
 
 use crate::shared::{CameraConfig, CameraDriver, CameraError};
-use alloc::borrow::Cow;
-use core::{ffi::CStr, ptr::null_mut};
+use alloc::{borrow::Cow, ffi::CString};
+use core::{ffi::CStr, mem::zeroed, ptr::null_mut};
 use ndk_sys::{
-    ACameraManager_create, ACameraManager_delete, ACameraManager_deleteCameraIdList,
-    ACameraManager_getCameraIdList, android_get_device_api_level, camera_status_t,
+    ACameraDevice, ACameraDevice_StateCallbacks, ACameraManager_create, ACameraManager_delete,
+    ACameraManager_deleteCameraIdList, ACameraManager_getCameraIdList, ACameraManager_openCamera,
+    android_get_device_api_level, camera_status_t,
 };
 use scopeguard::defer;
 
@@ -15,13 +16,32 @@ unsafe extern "C" {}
 #[derive(Clone, Debug, Default)]
 pub struct AndroidCameraDriver {
     pub config: CameraConfig,
-    pub api_level: u32,
+    pub api_level: Option<u32>,
+    #[allow(unused)]
+    state: AndroidCameraState,
+}
+
+#[derive(Clone, Debug)]
+pub struct AndroidCameraState {
+    device_id: CString,
+    device: *mut ACameraDevice,
+    device_state_callbacks: ACameraDevice_StateCallbacks,
+}
+
+impl Default for AndroidCameraState {
+    fn default() -> Self {
+        Self {
+            device_id: CString::new(vec![]).unwrap(),
+            device: null_mut(),
+            device_state_callbacks: unsafe { zeroed() },
+        }
+    }
 }
 
 impl AndroidCameraDriver {
     pub fn open(_input_url: impl AsRef<str>, config: CameraConfig) -> Result<Self, CameraError> {
         unsafe {
-            let api_level = android_get_device_api_level() as u32;
+            let api_level = Some(android_get_device_api_level() as u32);
             //eprintln!("android_get_device_api_level={}", api_level); // DEBUG
 
             let camera_manager = ACameraManager_create();
@@ -52,9 +72,28 @@ impl AndroidCameraDriver {
                 .iter()
                 .map(|p| CStr::from_ptr(*p).to_str().unwrap_or("").to_string())
                 .collect();
+            eprintln!("ACameraManager_getCameraIdList={:?}", camera_id_strings); // DEBUG
 
-            eprintln!("camera_ids: {:?}", camera_id_strings); // DEBUG
-            Ok(AndroidCameraDriver { config, api_level })
+            let mut state = AndroidCameraState::default();
+            state.device_id = CString::new(camera_id_strings[0].clone()).unwrap();
+
+            let status = ACameraManager_openCamera(
+                camera_manager,
+                state.device_id.as_ptr(),
+                &mut state.device_state_callbacks,
+                &mut state.device,
+            );
+            eprintln!("ACameraManager_openCamera={:?}", status); // DEBUG
+            if status != camera_status_t::ACAMERA_OK {
+                assert!(status != camera_status_t::ACAMERA_ERROR_INVALID_PARAMETER);
+                return Err(CameraError::NoCamera); // TODO
+            }
+
+            Ok(AndroidCameraDriver {
+                config,
+                api_level,
+                state,
+            })
         }
     }
 }

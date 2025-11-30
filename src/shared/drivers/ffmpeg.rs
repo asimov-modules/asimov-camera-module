@@ -35,7 +35,8 @@ impl CameraDriver for FfmpegCameraDriver {
 ///   - output `rgb24` rawvideo frames to `pipe:1`
 pub fn spawn_reader(config: &CameraConfig) -> Result<Child> {
     let input_device = get_input_device(&config.device);
-    let fps_s = config.fps.to_string();
+
+    const INPUT_FRAMERATE: u32 = 30;
 
     let mut ffargs: Vec<String> = vec![
         "-hide_banner".into(),
@@ -46,7 +47,7 @@ pub fn spawn_reader(config: &CameraConfig) -> Result<Child> {
         "-video_size".into(),
         format!("{}x{}", config.width, config.height),
         "-framerate".into(),
-        fps_s.clone(),
+        INPUT_FRAMERATE.to_string(),
     ];
 
     #[cfg(target_os = "macos")]
@@ -62,8 +63,6 @@ pub fn spawn_reader(config: &CameraConfig) -> Result<Child> {
         "veryfast".into(),
         "-tune".into(),
         "zerolatency".into(),
-        "-vf".into(),
-        format!("fps={}", fps_s),
         "-pix_fmt".into(),
         "rgb24".into(),
         "-f".into(),

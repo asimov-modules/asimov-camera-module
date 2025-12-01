@@ -3,6 +3,8 @@
 use super::CameraError;
 use core::result::Result;
 
+pub type FrameCallback = Box<dyn Fn(&[u8], usize, usize, usize) + Send + Sync>;
+
 pub trait CameraDriver {
     fn start(&mut self) -> Result<(), CameraError> {
         Err(CameraError::NoCamera)

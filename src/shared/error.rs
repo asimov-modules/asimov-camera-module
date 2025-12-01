@@ -6,4 +6,5 @@ use derive_more::{Display, Error, From};
 pub enum CameraError {
     NoDriver,
     NoCamera,
+    Other,
 }

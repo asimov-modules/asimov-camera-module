@@ -1,12 +1,30 @@
 // This is free and unencumbered software released into the public domain.
 
+mod camera_device;
+pub use camera_device::*;
+
+mod capture_request;
+pub use capture_request::*;
+
+mod capture_session;
+pub use capture_session::*;
+
+mod image;
+pub use image::*;
+
+mod image_reader;
+pub use image_reader::*;
+
+mod native_window;
+pub use native_window::*;
+
 use crate::shared::{CameraConfig, CameraDriver, CameraError};
 use alloc::{borrow::Cow, ffi::CString};
-use core::{ffi::CStr, mem::zeroed, ptr::null_mut};
+use core::{ffi::CStr, ptr::null_mut};
 use ndk_sys::{
-    ACameraDevice, ACameraDevice_StateCallbacks, ACameraManager_create, ACameraManager_delete,
-    ACameraManager_deleteCameraIdList, ACameraManager_getCameraIdList, ACameraManager_openCamera,
-    android_get_device_api_level, camera_status_t,
+    ACameraManager_create, ACameraManager_delete, ACameraManager_deleteCameraIdList,
+    ACameraManager_getCameraIdList, ACameraManager_openCamera, android_get_device_api_level,
+    camera_status_t,
 };
 use scopeguard::defer;
 
@@ -16,32 +34,29 @@ unsafe extern "C" {}
 #[derive(Clone, Debug, Default)]
 pub struct AndroidCameraDriver {
     pub config: CameraConfig,
-    pub api_level: Option<u32>,
+    pub api_level: u32,
     #[allow(unused)]
-    state: AndroidCameraState,
+    pub(crate) device: AndroidCameraDevice,
+    #[allow(unused)]
+    pub(crate) session: Option<AndroidCameraSession>,
 }
 
-#[derive(Clone, Debug)]
-pub struct AndroidCameraState {
-    device_id: CString,
-    device: *mut ACameraDevice,
-    device_state_callbacks: ACameraDevice_StateCallbacks,
+impl dogma::Named for AndroidCameraDriver {
+    fn name(&self) -> Cow<'_, str> {
+        "camera2".into()
+    }
 }
 
-impl Default for AndroidCameraState {
-    fn default() -> Self {
-        Self {
-            device_id: CString::new(vec![]).unwrap(),
-            device: null_mut(),
-            device_state_callbacks: unsafe { zeroed() },
-        }
+impl Drop for AndroidCameraDriver {
+    fn drop(&mut self) {
+        self.stop().ok();
     }
 }
 
 impl AndroidCameraDriver {
     pub fn open(_input_url: impl AsRef<str>, config: CameraConfig) -> Result<Self, CameraError> {
         unsafe {
-            let api_level = Some(android_get_device_api_level() as u32);
+            let api_level = android_get_device_api_level() as u32;
             //eprintln!("android_get_device_api_level={}", api_level); // DEBUG
 
             let camera_manager = ACameraManager_create();
@@ -74,14 +89,14 @@ impl AndroidCameraDriver {
                 .collect();
             eprintln!("ACameraManager_getCameraIdList={:?}", camera_id_strings); // DEBUG
 
-            let mut state = AndroidCameraState::default();
-            state.device_id = CString::new(camera_id_strings[0].clone()).unwrap();
+            let mut device = AndroidCameraDevice::default();
+            device.device_id = CString::new(camera_id_strings[0].clone()).unwrap();
 
             let status = ACameraManager_openCamera(
                 camera_manager,
-                state.device_id.as_ptr(),
-                &mut state.device_state_callbacks,
-                &mut state.device,
+                device.device_id.as_ptr(),
+                &mut device.device_state_callbacks,
+                &mut device.device,
             );
             eprintln!("ACameraManager_openCamera={:?}", status); // DEBUG
             if status != camera_status_t::ACAMERA_OK {
@@ -92,16 +107,21 @@ impl AndroidCameraDriver {
             Ok(AndroidCameraDriver {
                 config,
                 api_level,
-                state,
+                device,
+                session: None,
             })
         }
     }
 }
 
-impl dogma::Named for AndroidCameraDriver {
-    fn name(&self) -> Cow<'_, str> {
-        "camera2".into()
+impl CameraDriver for AndroidCameraDriver {
+    fn start(&mut self) -> Result<(), CameraError> {
+        self.session = Some(AndroidCameraSession::new(&self.device)?);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), CameraError> {
+        self.session = None;
+        Ok(())
     }
 }
-
-impl CameraDriver for AndroidCameraDriver {}

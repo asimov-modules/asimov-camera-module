@@ -1,33 +1,27 @@
 // This is free and unencumbered software released into the public domain.
 
-use crate::shared::CameraError;
+use super::MediaResult;
 use core::ptr::null_mut;
 use ndk_sys::{AImage, AImage_delete, AImage_getTimestamp, media_status_t};
 
 #[derive(Debug, Default)]
-pub struct AndroidImage {
+pub struct Image {
     pub(crate) handle: *mut AImage,
 }
 
-impl Drop for AndroidImage {
+impl Drop for Image {
     fn drop(&mut self) {
-        unsafe {
-            AImage_delete(self.handle);
-            self.handle = null_mut();
-        }
+        unsafe { AImage_delete(self.handle) }
+        self.handle = null_mut();
     }
 }
 
-impl AndroidImage {
-    pub fn get_timestamp(&self) -> Result<i64, CameraError> {
+impl Image {
+    pub fn get_timestamp(&self) -> MediaResult<i64> {
         let mut result = 0;
-        let status;
-        unsafe {
-            status = AImage_getTimestamp(self.handle, &mut result);
-        }
+        let status = unsafe { AImage_getTimestamp(self.handle, &mut result) };
         if status != media_status_t::AMEDIA_OK {
-            assert!(status != media_status_t::AMEDIA_ERROR_INVALID_PARAMETER);
-            return Err(CameraError::Other); // TODO
+            return Err(status.into());
         }
         Ok(result as _)
     }

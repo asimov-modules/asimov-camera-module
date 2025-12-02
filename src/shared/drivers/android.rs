@@ -1,19 +1,37 @@
 // This is free and unencumbered software released into the public domain.
 
+mod camera_capture_session;
+pub use camera_capture_session::*;
+
 mod camera_device;
 pub use camera_device::*;
+
+mod camera_manager;
+pub use camera_manager::*;
+
+mod camera_output_target;
+pub use camera_output_target::*;
+
+mod camera_status;
+pub use camera_status::*;
 
 mod capture_request;
 pub use capture_request::*;
 
-mod capture_session;
-pub use capture_session::*;
+mod capture_session_output;
+pub use capture_session_output::*;
+
+mod capture_session_output_container;
+pub use capture_session_output_container::*;
 
 mod image;
 pub use image::*;
 
 mod image_reader;
 pub use image_reader::*;
+
+mod media_status;
+pub use media_status::*;
 
 mod native_window;
 pub use native_window::*;
@@ -31,14 +49,20 @@ use scopeguard::defer;
 #[link(name = "camera2ndk")]
 unsafe extern "C" {}
 
+#[link(name = "mediandk")]
+unsafe extern "C" {}
+
+#[link(name = "binder_ndk")]
+unsafe extern "C" {}
+
 #[derive(Clone, Debug, Default)]
 pub struct AndroidCameraDriver {
     pub config: CameraConfig,
     pub api_level: u32,
     #[allow(unused)]
-    pub(crate) device: AndroidCameraDevice,
+    pub(crate) device: CameraDevice,
     #[allow(unused)]
-    pub(crate) session: Option<AndroidCameraSession>,
+    pub(crate) session: Option<CameraCaptureSession>,
 }
 
 impl dogma::Named for AndroidCameraDriver {
@@ -89,19 +113,19 @@ impl AndroidCameraDriver {
                 .collect();
             eprintln!("ACameraManager_getCameraIdList={:?}", camera_id_strings); // DEBUG
 
-            let mut device = AndroidCameraDevice::default();
-            device.device_id = CString::new(camera_id_strings[0].clone()).unwrap();
+            let mut device = CameraDevice::default();
+            let device_id = CString::new(camera_id_strings[0].clone()).unwrap();
 
             let status = ACameraManager_openCamera(
                 camera_manager,
-                device.device_id.as_ptr(),
-                &mut device.device_state_callbacks,
-                &mut device.device,
+                device_id.as_ptr(),
+                &mut device.state_callbacks,
+                &mut device.handle,
             );
             eprintln!("ACameraManager_openCamera={:?}", status); // DEBUG
             if status != camera_status_t::ACAMERA_OK {
                 assert!(status != camera_status_t::ACAMERA_ERROR_INVALID_PARAMETER);
-                return Err(CameraError::NoCamera); // TODO
+                return Err(CameraError::Other); // TODO
             }
 
             Ok(AndroidCameraDriver {
@@ -116,7 +140,9 @@ impl AndroidCameraDriver {
 
 impl CameraDriver for AndroidCameraDriver {
     fn start(&mut self) -> Result<(), CameraError> {
-        self.session = Some(AndroidCameraSession::new(&self.device)?);
+        let session_output_container = CaptureSessionOutputContainer::new().unwrap();
+        self.session =
+            Some(CameraCaptureSession::open(&self.device, &session_output_container).unwrap()); // FIXME
         Ok(())
     }
 

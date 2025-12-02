@@ -89,30 +89,35 @@ impl AvfCameraDriver {
     }
 
     /// Finds a device by Unique ID or Name. Falls back to default if config.device is empty.
-    unsafe fn find_device(device_id: &str) -> Result<Retained<AVCaptureDevice>, CameraError> {
+    fn find_device(device_id: &str) -> Result<Retained<AVCaptureDevice>, CameraError> {
         if device_id.is_empty() {
-            return AVCaptureDevice::defaultDeviceWithMediaType(AVMediaTypeVideo.unwrap().as_ref())
-                .ok_or(CameraError::DriverError);
+            return unsafe {
+                AVCaptureDevice::defaultDeviceWithMediaType(AVMediaTypeVideo.unwrap().as_ref())
+            }
+            .ok_or(CameraError::DriverError);
         }
 
         // Discovery Session: Look for Built-in and External (USB) cameras
-        let device_types = NSArray::from_slice(&[
-            AVCaptureDeviceTypeBuiltInWideAngleCamera.as_ref(),
-            AVCaptureDeviceTypeExternal.as_ref(),
-        ]);
+        let device_types = unsafe {
+            NSArray::from_slice(&[
+                AVCaptureDeviceTypeBuiltInWideAngleCamera.as_ref(),
+                AVCaptureDeviceTypeExternal.as_ref(),
+            ])
+        };
 
-        let discovery =
+        let discovery = unsafe {
             AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
                 &device_types,
                 AVMediaTypeVideo,
                 AVCaptureDevicePosition::Unspecified,
-            );
+            )
+        };
 
-        let devices = discovery.devices();
+        let devices = unsafe { discovery.devices() };
 
         // 1. Try Exact Match on Unique ID
         for device in devices.iter() {
-            let id = device.uniqueID();
+            let id = unsafe { device.uniqueID() };
             if id.to_string() == device_id {
                 return Ok(device.retain());
             }
@@ -120,7 +125,7 @@ impl AvfCameraDriver {
 
         // 2. Try Match on Localized Name (User friendly name)
         for device in devices.iter() {
-            let name = device.localizedName();
+            let name = unsafe { device.localizedName() };
             if name.to_string() == device_id {
                 return Ok(device.retain());
             }
@@ -142,23 +147,24 @@ impl AvfCameraDriver {
         // lockForConfiguration returns a BOOL in ObjC, or throws error.
         // Rust binding signatures vary, assuming standard Result or Bool return.
         // Using generic Result mapping here:
-        if device.lockForConfiguration().is_err() {
+        if unsafe { device.lockForConfiguration() }.is_err() {
             return Err(CameraError::NoCamera);
         }
 
-        let formats = device.formats();
+        let formats = unsafe { device.formats() };
         let mut best_format = None;
 
         for format in formats.iter() {
-            let desc = format.formatDescription();
+            let desc = unsafe { format.formatDescription() };
             // Get dimensions from CMVideoFormatDescription
-            let dimensions = objc2_core_media::CMVideoFormatDescriptionGetDimensions(&desc);
+            let dimensions =
+                unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(&desc) };
 
             if dimensions.width as u32 == config.width && dimensions.height as u32 == config.height
             {
                 // Check FPS support
-                for range in format.videoSupportedFrameRateRanges() {
-                    let max_rate = range.maxFrameRate();
+                for range in unsafe { format.videoSupportedFrameRateRanges() } {
+                    let max_rate = unsafe { range.maxFrameRate() };
                     if max_rate >= config.fps {
                         best_format = Some(format);
                         break;
@@ -171,16 +177,18 @@ impl AvfCameraDriver {
         }
 
         if let Some(fmt) = best_format {
-            device.setActiveFormat(&fmt);
+            unsafe { device.setActiveFormat(&fmt) };
 
             // Set Frame Duration (inverse of FPS)
             // CMTimeMake(1, fps)
-            let duration = CMTime::new(1, config.fps as i32);
-            device.setActiveVideoMinFrameDuration(duration);
-            device.setActiveVideoMaxFrameDuration(duration);
+            let duration = unsafe { CMTime::new(1, config.fps as i32) };
+            unsafe {
+                device.setActiveVideoMinFrameDuration(duration);
+                device.setActiveVideoMaxFrameDuration(duration);
+            }
         }
 
-        device.unlockForConfiguration();
+        unsafe { device.unlockForConfiguration() };
         Ok(())
     }
 }
@@ -204,6 +212,7 @@ impl CameraDriver for AvfCameraDriver {
             session.stopRunning();
         }
         self.session = None;
+        self.delegate = None;
         Ok(())
     }
 }

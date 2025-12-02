@@ -76,3 +76,8 @@ required-features = ["cli", "ffmpeg"]
 name = "asimov-camera-cataloger"
 path = "src/cataloger/main.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "asimov-camera-avf"
+path = "src/avf-test/main.rs"
+required-features = ["cli"]

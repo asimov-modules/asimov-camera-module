@@ -1,6 +1,6 @@
 // This is free and unencumbered software released into the public domain.
 
-use crate::shared::{CameraConfig, CameraDriver, CameraError, FrameCallback};
+use crate::shared::{CameraConfig, CameraDriver, CameraError, Frame, FrameCallback};
 use alloc::borrow::Cow;
 use dispatch2::DispatchQueue;
 use objc2::runtime::ProtocolObject;
@@ -43,42 +43,7 @@ impl AvfCameraDriver {
     ) -> Result<Self, CameraError> {
         unsafe {
             let session = AVCaptureSession::new();
-            session.beginConfiguration();
-
-            let device = Self::find_device(&config.device)?;
-
-            Self::apply_configuration_to_device(&device, &config)?;
-
-            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device)
-                .map_err(|_| CameraError::DriverError)?;
-
-            if session.canAddInput(&input) {
-                session.addInput(&input);
-            } else {
-                return Err(CameraError::DriverError);
-            }
-
-            let output = AVCaptureVideoDataOutput::new();
-
-            // BGRA Format
-            let key = ns_string!("PixelFormatType");
-            let value = NSNumber::new_i32(1111970369); // kCVPixelFormatType_32BGRA
-            let settings = NSDictionary::<NSString>::from_slices(&[key], &[&value]);
-            output.setVideoSettings(Some(&*settings));
-
-            let queue = DispatchQueue::new("camera_queue", None);
-
-            let delegate = AvfCameraDelegate::new(on_frame);
-            let protocol_obj = ProtocolObject::from_ref(&*delegate);
-            output.setSampleBufferDelegate_queue(Some(protocol_obj), Some(&*queue));
-
-            if session.canAddOutput(&output) {
-                session.addOutput(&output);
-            } else {
-                return Err(CameraError::DriverError);
-            }
-
-            session.commitConfiguration();
+            let delegate = Self::configure_session(&session, &config, on_frame)?;
 
             Ok(Self {
                 config,
@@ -86,6 +51,74 @@ impl AvfCameraDriver {
                 delegate: Some(delegate),
             })
         }
+    }
+
+    /// Configures an `AVCaptureSession` for video capture.
+    ///
+    /// This helper:
+    /// - starts a configuration transaction (`beginConfiguration` / `commitConfiguration`)
+    /// - selects the capture device based on `CameraConfig::device`
+    /// - applies the requested width / height / FPS if supported
+    /// - creates and attaches an `AVCaptureDeviceInput`
+    /// - creates a `AVCaptureVideoDataOutput` configured for BGRA frames
+    /// - installs an `AvfCameraDelegate` wired to the provided `FrameCallback`
+    ///
+    /// On success returns the retained delegate associated with the session.
+    /// On error returns `CameraError`, and the session is still left in a
+    /// committed, consistent state (no dangling configuration transaction).
+    fn configure_session(
+        session: &AVCaptureSession,
+        config: &CameraConfig,
+        callback: FrameCallback,
+    ) -> Result<Retained<AvfCameraDelegate>, CameraError> {
+        unsafe { session.beginConfiguration() };
+
+        let result: Result<Retained<AvfCameraDelegate>, CameraError> = (|| {
+            let device = Self::find_device(&config.device)?;
+
+            unsafe {
+                Self::apply_configuration_to_device(&device, config)?;
+            }
+
+            let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
+                .map_err(|_| CameraError::DriverError)?;
+
+            unsafe {
+                if !session.canAddInput(&input) {
+                    return Err(CameraError::DriverError);
+                }
+                session.addInput(&input);
+            }
+
+            let output = unsafe { AVCaptureVideoDataOutput::new() };
+
+            // BGRA pixel format ("BGRA" → kCVPixelFormatType_32BGRA).
+            unsafe {
+                let key = ns_string!("PixelFormatType");
+                let value = NSNumber::new_i32(i32::from_be_bytes(*b"BGRA"));
+                let settings = NSDictionary::<NSString>::from_slices(&[key], &[&value]);
+                output.setVideoSettings(Some(&*settings));
+            }
+
+            let queue = DispatchQueue::new("asimov.camera.avf.queue", None);
+            let delegate = AvfCameraDelegate::new(callback);
+
+            unsafe {
+                let protocol_obj = ProtocolObject::from_ref(&*delegate);
+                output.setSampleBufferDelegate_queue(Some(protocol_obj), Some(&*queue));
+
+                if !session.canAddOutput(&output) {
+                    return Err(CameraError::DriverError);
+                }
+                session.addOutput(&output);
+            }
+
+            Ok(delegate)
+        })();
+
+        unsafe { session.commitConfiguration() };
+
+        result
     }
 
     /// Finds a device by Unique ID or Name. Falls back to default if config.device is empty.
@@ -115,7 +148,6 @@ impl AvfCameraDriver {
 
         let devices = unsafe { discovery.devices() };
 
-        // 1. Try Exact Match on Unique ID
         for device in devices.iter() {
             let id = unsafe { device.uniqueID() };
             if id.to_string() == device_id {
@@ -123,7 +155,6 @@ impl AvfCameraDriver {
             }
         }
 
-        // 2. Try Match on Localized Name (User friendly name)
         for device in devices.iter() {
             let name = unsafe { device.localizedName() };
             if name.to_string() == device_id {
@@ -143,10 +174,6 @@ impl AvfCameraDriver {
             return Ok(());
         }
 
-        // We must lock the device to change its active format
-        // lockForConfiguration returns a BOOL in ObjC, or throws error.
-        // Rust binding signatures vary, assuming standard Result or Bool return.
-        // Using generic Result mapping here:
         if unsafe { device.lockForConfiguration() }.is_err() {
             return Err(CameraError::NoCamera);
         }
@@ -156,13 +183,11 @@ impl AvfCameraDriver {
 
         for format in formats.iter() {
             let desc = unsafe { format.formatDescription() };
-            // Get dimensions from CMVideoFormatDescription
             let dimensions =
                 unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(&desc) };
 
             if dimensions.width as u32 == config.width && dimensions.height as u32 == config.height
             {
-                // Check FPS support
                 for range in unsafe { format.videoSupportedFrameRateRanges() } {
                     let max_rate = unsafe { range.maxFrameRate() };
                     if max_rate >= config.fps {
@@ -179,8 +204,6 @@ impl AvfCameraDriver {
         if let Some(fmt) = best_format {
             unsafe { device.setActiveFormat(&fmt) };
 
-            // Set Frame Duration (inverse of FPS)
-            // CMTimeMake(1, fps)
             let duration = unsafe { CMTime::new(1, config.fps as i32) };
             unsafe {
                 device.setActiveVideoMinFrameDuration(duration);
@@ -232,60 +255,38 @@ define_class!(
             sample_buffer: &CMSampleBuffer,
             _connection: &AVCaptureConnection,
         ) {
+            let Some(pixel_buffer) = (unsafe { CMSampleBuffer::image_buffer(sample_buffer) })
+            else {
+                return;
+            };
+
+            if unsafe {
+                CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly)
+            } != 0
+            {
+                return;
+            }
+
+            let width = CVPixelBufferGetWidth(&pixel_buffer);
+            let height = CVPixelBufferGetHeight(&pixel_buffer);
+            let bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
+            let base_address = CVPixelBufferGetBaseAddress(&pixel_buffer);
+            let size = CVPixelBufferGetDataSize(&pixel_buffer);
+
+            if base_address.is_null() || size == 0 {
+                unsafe {
+                    CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
+                }
+                return;
+            }
+
+            let data_in = unsafe { core::slice::from_raw_parts(base_address as *const u8, size) };
+            let data = data_in.to_vec();
+
+            let frame = Frame::new_bgra(data, width, height, bytes_per_row);
+            (self.ivars().callback)(frame);
+
             unsafe {
-                let Some(pixel_buffer) = CMSampleBuffer::image_buffer(sample_buffer) else {
-                    return;
-                };
-
-                if CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly)
-                    != 0
-                {
-                    return;
-                }
-
-                let width = CVPixelBufferGetWidth(&pixel_buffer);
-                let height = CVPixelBufferGetHeight(&pixel_buffer);
-                let bytes_per_row_in = CVPixelBufferGetBytesPerRow(&pixel_buffer);
-                let base_address = CVPixelBufferGetBaseAddress(&pixel_buffer);
-
-                // The input is BGRA (4 bytes per pixel)
-                // We want RGB (3 bytes per pixel)
-                let size_in = CVPixelBufferGetDataSize(&pixel_buffer);
-                let data_in = core::slice::from_raw_parts(base_address as *const u8, size_in);
-
-                let output_len = (width * height * 3) as usize; // 3 bytes per pixel
-                let mut data_out = Vec::with_capacity(output_len);
-
-                let width_usize = width as usize;
-                let height_usize = height as usize;
-
-                // Iterate row by row (necessary due to bytes_per_row padding)
-                for y in 0..height_usize {
-                    let row_start_in = y * bytes_per_row_in;
-                    let row_end_in = row_start_in + width_usize * 4; // 4 bytes per pixel input
-
-                    if row_end_in > size_in {
-                        continue;
-                    }
-
-                    // Process 4 bytes (BGRA) -> 3 bytes (RGB)
-                    for x in (row_start_in..row_end_in).step_by(4) {
-                        // Input format is BGRA (B=x, G=x+1, R=x+2, A=x+3)
-
-                        let r = data_in[x + 2]; // R
-                        let g = data_in[x + 1]; // G
-                        let b = data_in[x + 0]; // B
-                        // A is ignored (data_in[x + 3])
-
-                        data_out.push(r);
-                        data_out.push(g);
-                        data_out.push(b);
-                    }
-                }
-
-                // Note: We use the *new* RGB buffer size and 3 bytes per pixel for output
-                (self.ivars().callback)(data_out.as_slice(), width, height, width * 3);
-
                 CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
             }
         }

@@ -31,5 +31,8 @@ pub mod drivers {
 mod error;
 pub use error::*;
 
+mod frame;
+pub use frame::*;
+
 mod open;
 pub use open::*;

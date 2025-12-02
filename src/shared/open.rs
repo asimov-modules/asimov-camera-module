@@ -5,7 +5,7 @@ use super::{CameraConfig, CameraDriver, CameraError, FrameCallback};
 pub fn open_camera(
     input_url: impl AsRef<str>,
     config: CameraConfig,
-    on_frame: FrameCallback,
+    callback: FrameCallback,
 ) -> Result<Box<dyn CameraDriver>, CameraError> {
     if cfg!(feature = "ffmpeg") {
         #[cfg(feature = "ffmpeg")]
@@ -25,7 +25,7 @@ pub fn open_camera(
     if cfg!(any(target_os = "ios", target_os = "macos")) {
         #[cfg(any(target_os = "ios", target_os = "macos"))]
         return Ok(Box::new(super::drivers::avf::AvfCameraDriver::open(
-            input_url, config, on_frame,
+            input_url, config, callback,
         )?));
     }
 

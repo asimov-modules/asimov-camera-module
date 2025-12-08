@@ -202,10 +202,10 @@ impl AvfCameraDriver {
         }
 
         if let Some(fmt) = best_format {
-            unsafe { device.setActiveFormat(&fmt) };
-
-            let duration = unsafe { CMTime::new(1, config.fps as i32) };
             unsafe {
+                device.setActiveFormat(&fmt);
+
+                let duration = CMTime::new(1, config.fps as i32);
                 device.setActiveVideoMinFrameDuration(duration);
                 device.setActiveVideoMaxFrameDuration(duration);
             }
@@ -246,6 +246,8 @@ define_class!(
     #[ivars = AvfCameraDelegateVars]
     #[derive(Debug)]
     struct AvfCameraDelegate;
+
+    unsafe impl NSObjectProtocol for AvfCameraDelegate {}
 
     unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for AvfCameraDelegate {
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
@@ -299,8 +301,6 @@ impl AvfCameraDelegate {
         unsafe { msg_send![super(this), init] }
     }
 }
-
-unsafe impl NSObjectProtocol for AvfCameraDelegate {}
 
 pub struct AvfCameraDelegateVars {
     callback: FrameCallback,

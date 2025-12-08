@@ -80,4 +80,9 @@ required-features = ["cli"]
 [[bin]]
 name = "asimov-camera-avf"
 path = "src/avf-test/main.rs"
-required-features = ["cli"]
+
+[patch.crates-io]
+core-video-sys = { path = "vendor/rust-core-video-sys" }
+
+[lib]
+crate-type = ["staticlib", "rlib"]

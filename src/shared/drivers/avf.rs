@@ -319,8 +319,6 @@ impl CameraDriver for AvfCameraDriver {
             s.stopRunning();
         });
 
-        self.session = None;
-        self.delegate = None;
         Ok(())
     }
 }

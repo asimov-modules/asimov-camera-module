@@ -7,4 +7,5 @@ pub enum CameraError {
     NoDriver,
     NoCamera,
     DriverError,
+    Other,
 }

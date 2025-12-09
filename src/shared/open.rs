@@ -12,7 +12,10 @@ pub fn open_camera(
         any(target_os = "macos", target_os = "linux", target_os = "windows")
     ))]
     {
-        return Ok(Box::new(super::drivers::ffmpeg::FfmpegCameraDriver { config, process: None }));
+        return Ok(Box::new(super::drivers::ffmpeg::FfmpegCameraDriver {
+            config,
+            process: None,
+        }));
     }
 
     #[cfg(target_os = "android")]
@@ -25,9 +28,7 @@ pub fn open_camera(
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
         return Ok(Box::new(super::drivers::avf::AvfCameraDriver::open(
-            input_url,
-            config,
-            callback,
+            input_url, config, callback,
         )?));
     }
 

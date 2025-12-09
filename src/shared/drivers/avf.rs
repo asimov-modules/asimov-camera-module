@@ -1,10 +1,33 @@
 // This is free and unencumbered software released into the public domain.
 
+//! AVFoundation-based camera driver for iOS/macOS.
+//!
+//! This driver:
+//! - Opens and configures an `AVCaptureSession` based on [`CameraConfig`].
+//! - Captures BGRA frames and forwards them to a [`FrameCallback`] on a
+//!   dedicated `DispatchQueue`.
+//! - Exposes the underlying `AVCaptureSession` via [`AvfCameraDriver::session_bound`]
+//!   so that the iOS FFI layer can create a live preview (`AVCaptureVideoPreviewLayer`).
+//!
+//! Threading model:
+//! - [`AvfCameraDriver::open`] **must** be called on the main thread.
+//!   If it is not, it returns [`CameraError::DriverError`].
+//! - [`CameraDriver::start`] and [`CameraDriver::stop`] *may* be called from any
+//!   thread. Internally, AVFoundation calls are always executed on the main thread
+//!   via `MainThreadBound`.
+//!
+//! Ownership & lifetime:
+//! - `AvfCameraDriver` owns the `AVCaptureSession` and the delegate.
+//! - Resources are released when [`CameraDriver::stop`] is called or when the
+//!   driver is dropped. [`Drop`] calls `stop()` as a best-effort safety net.
+
 use crate::shared::{CameraConfig, CameraDriver, CameraError, Frame, FrameCallback};
 use alloc::borrow::Cow;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::runtime::ProtocolObject;
-use objc2::{AllocAnyThread, DeclaredClass, Message, define_class, msg_send, rc::Retained};
+use objc2::{
+    AllocAnyThread, DeclaredClass, MainThreadMarker, Message, define_class, msg_send, rc::Retained,
+};
 use objc2_av_foundation::{
     AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceInput,
     AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
@@ -21,10 +44,26 @@ use objc2_foundation::{
     NSArray, NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSString, ns_string,
 };
 
-#[derive(Clone, Debug)]
+/// AVFoundation-backed camera driver.
+///
+/// Created with [`AvfCameraDriver::open`], then controlled through the
+/// [`CameraDriver`] trait (`start` / `stop`).
+///
+/// On iOS this is wrapped by the FFI layer (`src/ffi.rs`) and used from Swift.
+#[derive(Debug)]
 pub struct AvfCameraDriver {
+    /// Configuration used to initialize the driver.
     pub config: CameraConfig,
-    session: Option<Retained<AVCaptureSession>>,
+    /// Main-thread-bound `AVCaptureSession`.
+    ///
+    /// We wrap the session in `MainThreadBound` so that the driver struct
+    /// itself can be moved across threads while the actual AVFoundation work
+    /// still happens on the main thread.
+    session: Option<MainThreadBound<Retained<AVCaptureSession>>>,
+    /// Strong reference to the delegate that receives video frames.
+    ///
+    /// This must be kept alive as long as the session is running; otherwise
+    /// AVFoundation will stop delivering frames.
     #[allow(unused)]
     delegate: Option<Retained<AvfCameraDelegate>>,
 }
@@ -36,14 +75,32 @@ impl dogma::Named for AvfCameraDriver {
 }
 
 impl AvfCameraDriver {
+    /// Create a new AVFoundation camera driver.
+    ///
+    /// - `config.device` may be empty to select the default video device;
+    ///   otherwise it is matched against device unique ID or localized name.
+    /// - `config.width` / `height` / `fps` are best-effort; if the exact
+    ///   combination is not supported, the device format is left unchanged.
+    /// - `callback` is invoked on a dedicated background `DispatchQueue` for
+    ///   each frame, with BGRA pixel data.
+    ///
+    /// # Threading
+    ///
+    /// This must be called on the **main thread**. If called from a non-main
+    /// thread, it returns [`CameraError::DriverError`].
     pub fn open(
         _input_url: impl AsRef<str>,
         config: CameraConfig,
-        on_frame: FrameCallback,
+        callback: FrameCallback,
     ) -> Result<Self, CameraError> {
         unsafe {
+            // Ensure we are running on the main thread before touching AVFoundation.
+            let mtm = MainThreadMarker::new().ok_or(CameraError::DriverError)?;
+
             let session = AVCaptureSession::new();
-            let delegate = Self::configure_session(&session, &config, on_frame)?;
+            let delegate = Self::configure_session(&session, &config, callback)?;
+
+            let session = MainThreadBound::new(session, mtm);
 
             Ok(Self {
                 config,
@@ -51,6 +108,14 @@ impl AvfCameraDriver {
                 delegate: Some(delegate),
             })
         }
+    }
+
+    /// Return the bound `AVCaptureSession`.
+    ///
+    /// This is used by the iOS FFI layer to obtain a raw `AVCaptureSession*`
+    /// and construct an `AVCaptureVideoPreviewLayer` for live preview.
+    pub fn session_bound(&self) -> Option<&MainThreadBound<Retained<AVCaptureSession>>> {
+        self.session.as_ref()
     }
 
     /// Configures an `AVCaptureSession` for video capture.
@@ -121,7 +186,10 @@ impl AvfCameraDriver {
         result
     }
 
-    /// Finds a device by Unique ID or Name. Falls back to default if config.device is empty.
+    /// Finds a device by unique ID or localized name.
+    ///
+    /// - If `device_id` is empty, returns the default video device (if any).
+    /// - Otherwise tries to match `uniqueID`, then `localizedName`.
     fn find_device(device_id: &str) -> Result<Retained<AVCaptureDevice>, CameraError> {
         if device_id.is_empty() {
             return unsafe {
@@ -130,7 +198,7 @@ impl AvfCameraDriver {
             .ok_or(CameraError::DriverError);
         }
 
-        // Discovery Session: Look for Built-in and External (USB) cameras
+        // Discovery Session: Look for built-in and external (USB) cameras.
         let device_types = unsafe {
             NSArray::from_slice(&[
                 AVCaptureDeviceTypeBuiltInWideAngleCamera.as_ref(),
@@ -165,7 +233,10 @@ impl AvfCameraDriver {
         Err(CameraError::NoCamera)
     }
 
-    /// Iterates supported formats to find one matching width/height/fps
+    /// Iterates supported formats to find one matching width/height/fps.
+    ///
+    /// This is best-effort. If no matching format is found, the device's
+    /// active format is left unchanged.
     unsafe fn apply_configuration_to_device(
         device: &AVCaptureDevice,
         config: &CameraConfig,
@@ -217,26 +288,47 @@ impl AvfCameraDriver {
 }
 
 impl CameraDriver for AvfCameraDriver {
+    /// Start the `AVCaptureSession`.
+    ///
+    /// Threading:
+    /// - May be called from any thread; internally this hops to the main
+    ///   thread via `MainThreadBound::get_on_main`.
     fn start(&mut self) -> Result<(), CameraError> {
         let Some(ref session) = self.session else {
-            return Err(CameraError::NoCamera); // TODO
+            return Err(CameraError::NoCamera);
         };
-        unsafe {
-            session.startRunning();
-        }
+
+        session.get_on_main(|s| unsafe {
+            s.startRunning();
+        });
+
         Ok(())
     }
 
+    /// Stop the `AVCaptureSession` and release resources.
+    ///
+    /// Threading:
+    /// - May be called from any thread; internally this hops to the main
+    ///   thread via `MainThreadBound::get_on_main`.
     fn stop(&mut self) -> Result<(), CameraError> {
         let Some(ref session) = self.session else {
             return Ok(());
         };
-        unsafe {
-            session.stopRunning();
-        }
+
+        session.get_on_main(|s| unsafe {
+            s.stopRunning();
+        });
+
         self.session = None;
         self.delegate = None;
         Ok(())
+    }
+}
+
+impl Drop for AvfCameraDriver {
+    /// Best-effort cleanup if the caller forgot to call `stop()`.
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -296,14 +388,19 @@ define_class!(
 );
 
 impl AvfCameraDelegate {
+    /// Create a new delegate that forwards frames to the given callback.
     fn new(callback: FrameCallback) -> Retained<Self> {
         let this = Self::alloc().set_ivars(AvfCameraDelegateVars { callback });
         unsafe { msg_send![super(this), init] }
     }
 }
 
+/// Stored ivars for `AvfCameraDelegate`.
+///
+/// We intentionally do not implement `Clone` because `FrameCallback`
+/// (`Box<dyn Fn(Frame)...>`) is not clonable.
 pub struct AvfCameraDelegateVars {
-    callback: FrameCallback,
+    pub(crate) callback: FrameCallback,
 }
 
 impl Clone for AvfCameraDelegateVars {

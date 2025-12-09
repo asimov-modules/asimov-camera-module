@@ -8,7 +8,10 @@ pub use driver::*;
 
 pub mod drivers {
     /// Camera driver using FFmpeg.
-    #[cfg(all(feature = "ffmpeg", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "ffmpeg",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     pub mod ffmpeg;
 
     /// Camera driver using the NDK on Android.

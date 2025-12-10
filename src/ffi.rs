@@ -52,6 +52,7 @@ impl From<CameraError> for AsimovCameraErrorCode {
             CameraError::NoDriver => AsimovCameraErrorCode::NoDriver,
             CameraError::NoCamera => AsimovCameraErrorCode::NoCamera,
             CameraError::DriverError => AsimovCameraErrorCode::DriverError,
+            CameraError::Other(_) => AsimovCameraErrorCode::DriverError,
         }
     }
 }

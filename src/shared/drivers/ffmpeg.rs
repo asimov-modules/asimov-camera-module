@@ -1,8 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-compile_error!("FFmpeg camera driver currently supports only macOS, Linux and Windows.");
-
 use crate::core::{Error, Result};
 use crate::shared::{CameraConfig, CameraDriver, CameraError};
 use alloc::borrow::Cow;

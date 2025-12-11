@@ -5,7 +5,7 @@ compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
     core::{self, Error, Result as CoreResult},
-    shared::{CameraConfig, drivers::ffmpeg, open_camera},
+    shared::{CameraConfig, drivers::ffmpeg},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -15,7 +15,7 @@ use know::traits::ToJsonLd;
 use std::{
     error::Error as StdError,
     io::{self, Read, Write},
-    process::Child,
+    process::{Child, Command},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -30,8 +30,8 @@ struct Options {
     flags: StandardOptions,
 
     /// Input camera device (e.g., "0" for /dev/video0 or device name)
-    #[arg(default_value = "file:/dev/video0")]
-    device: String,
+    #[arg()]
+    device: Option<String>,
 
     /// Desired dimensions in WxH format (e.g. 1920x1080)
     #[arg(short, long = "size", value_parser = parse_dimensions, default_value = "640x480")]
@@ -106,6 +106,11 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
     let (width, height) = opts.size;
     let fps = opts.frequency;
 
+    let device = opts
+        .device
+        .clone()
+        .unwrap_or_else(|| find_usb_camera().unwrap_or("file:/dev/video0".to_string()));
+
     let min_interval = Duration::from_secs_f64(1.0 / fps);
 
     let mut last_hash: Option<image_hasher::ImageHash> = None;
@@ -115,7 +120,7 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
         None
     };
 
-    let config = CameraConfig::new(opts.device.clone(), width, height, fps);
+    let config = CameraConfig::new(device.clone(), width, height, fps);
 
     let child = ffmpeg::spawn_reader(&config)?;
     *child_holder
@@ -190,11 +195,11 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
             .as_secs();
 
         let img = know::classes::Image {
-            id: Some(format!("{}#{}", &opts.device, ts)),
+            id: Some(format!("{}#{}", &device, ts)),
             width: Some(width as _),
             height: Some(height as _),
             data: buffer.clone(),
-            source: Some(opts.device.clone()),
+            source: Some(device.clone()),
         };
 
         let json = img.to_jsonld().map_err(|e| Error::JsonLd(e.to_string()))?;
@@ -269,4 +274,67 @@ fn parse_frequency(s: &str) -> Result<f64, String> {
     }
 
     Ok(freq)
+}
+
+fn find_usb_camera() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Run ffmpeg to list devices
+        let ffmpeg_output = Command::new("ffmpeg")
+            .args([
+                "-f",
+                "avfoundation",
+                "-list_devices",
+                "true",
+                "-i",
+                "",
+                "-hide_banner",
+            ])
+            .output()
+            .ok()?;
+        let ffmpeg_stdout = String::from_utf8(ffmpeg_output.stderr).ok()?;
+
+        // Parse video devices
+        let mut devices = vec![];
+        let mut in_video = false;
+        for line in ffmpeg_stdout.lines() {
+            if line.contains("AVFoundation video devices:") {
+                in_video = true;
+                continue;
+            }
+            if line.contains("AVFoundation audio devices:") {
+                break;
+            }
+            if in_video {
+                // Find the second [ after the indev ]
+                if let Some(first_end) = line.find("] ") {
+                    let rest = &line[first_end + 2..];
+                    if let Some(start) = rest.find('[') {
+                        if let Some(end) = rest[start..].find(']') {
+                            let id = &rest[start + 1..start + end];
+                            let name = &rest[start + end + 1..].trim();
+                            devices.push((id.to_string(), name.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run ioreg to check USB devices
+        let ioreg_output = Command::new("ioreg").args(["-p", "IOUSB"]).output().ok()?;
+        let ioreg_stdout = String::from_utf8(ioreg_output.stdout).ok()?;
+
+        // Find the first device whose name is in ioreg
+        for (id, name) in devices {
+            if ioreg_stdout.contains(&name) {
+                return Some(id);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // TODO: implement for other platforms
+        None
+    }
 }

@@ -36,7 +36,7 @@ pub use media_status::*;
 mod native_window;
 pub use native_window::*;
 
-use crate::shared::{CameraConfig, CameraDriver, CameraError};
+use crate::shared::{CameraConfig, CameraDriver, CameraError, FrameCallback};
 use alloc::{borrow::Cow, ffi::CString};
 use core::{ffi::CStr, ptr::null_mut};
 use ndk_sys::{
@@ -78,7 +78,11 @@ impl Drop for AndroidCameraDriver {
 }
 
 impl AndroidCameraDriver {
-    pub fn open(_input_url: impl AsRef<str>, config: CameraConfig) -> Result<Self, CameraError> {
+    pub fn open(
+        _input_url: impl AsRef<str>,
+        config: CameraConfig,
+        _callback: FrameCallback,
+    ) -> Result<Self, CameraError> {
         unsafe {
             let api_level = android_get_device_api_level() as u32;
             //eprintln!("android_get_device_api_level={}", api_level); // DEBUG

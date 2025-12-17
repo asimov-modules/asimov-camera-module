@@ -14,4 +14,14 @@ impl dogma::Named for DshowCameraDriver {
     }
 }
 
+impl DshowCameraDriver {
+    pub fn open(
+        _input_url: impl AsRef<str>,
+        config: CameraConfig,
+        _callback: FrameCallback,
+    ) -> Result<Self, CameraError> {
+        Err(CameraError::NoDriver)
+    }
+}
+
 impl CameraDriver for DshowCameraDriver {}

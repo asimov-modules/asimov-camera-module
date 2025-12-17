@@ -14,4 +14,14 @@ impl dogma::Named for V4l2CameraDriver {
     }
 }
 
+impl V4l2CameraDriver {
+    pub fn open(
+        _input_url: impl AsRef<str>,
+        config: CameraConfig,
+        _callback: FrameCallback,
+    ) -> Result<Self, CameraError> {
+        Err(CameraError::NoDriver)
+    }
+}
+
 impl CameraDriver for V4l2CameraDriver {}

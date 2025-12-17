@@ -5,7 +5,7 @@ compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
     core::{self, Error, Result as CoreResult},
-    shared::{CameraConfig, drivers::ffmpeg},
+    shared::{CameraConfig, Frame, PixelFormat, open_camera},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -14,8 +14,7 @@ use image_hasher::{HashAlg, HasherConfig};
 use know::traits::ToJsonLd;
 use std::{
     error::Error as StdError,
-    io::{self, Read, Write},
-    process::Child,
+    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -87,131 +86,128 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
     core::info_user(&opts.flags, "starting camera reader");
 
     let quit = Arc::new(AtomicBool::new(false));
-    let child_holder: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
 
+    // Ctrl+C handler sets the quit flag; the main loop stops the driver.
     {
         let quit = quit.clone();
-        let child_holder = child_holder.clone();
         ctrlc::set_handler(move || {
             quit.store(true, Ordering::SeqCst);
-            if let Ok(mut guard) = child_holder.lock() {
-                if let Some(child) = guard.as_mut() {
-                    let _ = child.kill();
-                }
-            }
         })
         .map_err(|e| Error::Other(format!("failed to install Ctrl+C handler: {e}")))?;
     }
 
     let (width, height) = opts.size;
     let fps = opts.frequency;
-
     let min_interval = Duration::from_secs_f64(1.0 / fps);
 
-    let mut last_hash: Option<image_hasher::ImageHash> = None;
     let hasher = if opts.debounce > 0 {
         Some(HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher())
     } else {
         None
     };
 
-    let config = CameraConfig::new(opts.device.clone(), width, height, fps);
+    // Shared state used by the callback.
+    let last_emit = Arc::new(Mutex::new(Instant::now()));
+    let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
 
-    let child = ffmpeg::spawn_reader(&config)?;
-    *child_holder
-        .lock()
-        .map_err(|_| Error::Other("failed to lock child holder".into()))? = Some(child);
+    let device_id = opts.device.clone();
+    let config = CameraConfig::new(device_id.clone(), width, height, fps);
 
-    let mut child = child_holder
-        .lock()
-        .map_err(|_| Error::Other("failed to lock child holder".into()))?
-        .take()
-        .ok_or_else(|| Error::Other("ffmpeg child missing from holder".into()))?;
+    let quit_cb = quit.clone();
+    let last_emit_cb = last_emit.clone();
+    let last_hash_cb = last_hash.clone();
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Other("failed to open ffmpeg stdout".into()))?;
-    let mut reader = io::BufReader::new(stdout);
-
-    let frame_size = (width * height * 3) as usize;
-    let mut buffer = vec![0u8; frame_size];
-
-    let mut out = io::stdout().lock();
-    let mut last_emit = Instant::now();
-
-    while !quit.load(Ordering::SeqCst) {
-        match reader.read_exact(&mut buffer) {
-            Ok(_) => {},
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => {
-                return Err(Error::Io {
-                    context: "reading ffmpeg output",
-                    source: e,
-                });
-            },
+    let debounce_level = opts.debounce;
+    let callback = Box::new(move |frame: Frame| {
+        if quit_cb.load(Ordering::SeqCst) {
+            return;
         }
 
-        if quit.load(Ordering::SeqCst) {
-            break;
+        // We assume FFmpeg provides RGB8 (rgb24). If backend delivers non-RGB8, skip for now.
+        // (AVF typically emits BGRA8; we can add conversion later if needed.)
+        if frame.pixel_format != PixelFormat::Rgb8 {
+            return;
         }
 
-        let now = Instant::now();
-        if now.duration_since(last_emit) < min_interval {
-            continue;
+        // Rate-limit emissions
+        {
+            let mut guard = last_emit_cb
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Instant::now();
+            if now.duration_since(*guard) < min_interval {
+                return;
+            }
+            *guard = now;
         }
-        last_emit = now;
 
+        // Debounce
         if let Some(ref hasher) = hasher {
-            let img_buffer =
-                image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, buffer.clone())
-                    .ok_or_else(|| {
-                        Error::InvalidFrameSize(format!(
-                            "failed to create image buffer {width}x{height}"
-                        ))
-                    })?;
-            let img_data = image::DynamicImage::ImageRgb8(img_buffer);
-            let hash = hasher.hash_image(&img_data);
+            if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
+                frame.width,
+                frame.height,
+                frame.data.clone(),
+            ) {
+                let img_data = image::DynamicImage::ImageRgb8(img_buffer);
+                let hash = hasher.hash_image(&img_data);
 
-            if let Some(ref mut prev_hash) = last_hash {
-                let dist = hash.dist(prev_hash);
-                if dist < opts.debounce as u32 {
-                    continue;
+                let mut prev = match last_hash_cb.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+
+                if let Some(ref mut prev_hash) = *prev {
+                    let dist = hash.dist(prev_hash);
+                    if dist < debounce_level as u32 {
+                        return;
+                    }
+                    *prev_hash = hash;
+                } else {
+                    *prev = Some(hash);
                 }
-                *prev_hash = hash;
-            } else {
-                last_hash = Some(hash);
             }
         }
 
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs();
-
-        let img = know::classes::Image {
-            id: Some(format!("{}#{}", &opts.device, ts)),
-            width: Some(width as _),
-            height: Some(height as _),
-            data: buffer.clone(),
-            source: Some(opts.device.clone()),
+        // Timestamp for ID: prefer frame timestamp if present; fallback to system time seconds.
+        let ts_secs: u64 = if frame.timestamp_ns != 0 {
+            frame.timestamp_ns / 1_000_000_000
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_else(|_| Duration::from_secs(0))
+                .as_secs()
         };
 
-        let json = img.to_jsonld().map_err(|e| Error::JsonLd(e.to_string()))?;
+        let img = know::classes::Image {
+            id: Some(format!("{device_id}#{ts_secs}")),
+            width: Some(frame.width as _),
+            height: Some(frame.height as _),
+            data: frame.data.clone(),
+            source: Some(device_id.clone()),
+        };
 
-        match writeln!(&mut out, "{json}") {
-            Ok(_) => {},
-            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => break,
-            Err(err) => {
-                return Err(Error::Io {
-                    context: "writing JSON output",
-                    source: err,
-                });
-            },
+        let json = match img.to_jsonld() {
+            Ok(v) => v,
+            Err(_) => return, // best-effort: do not panic inside callback
+        };
+
+        let mut out = io::stdout().lock();
+        if let Err(err) = writeln!(&mut out, "{json}") {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                quit_cb.store(true, Ordering::SeqCst);
+            }
         }
+    });
+
+    let mut driver = open_camera("", config, callback).map_err(|e| Error::Other(e.to_string()))?;
+
+    driver.start().map_err(|e| Error::Other(e.to_string()))?;
+
+    while !quit.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(50));
     }
 
-    let _ = child.kill();
+    let _ = driver.stop();
 
     #[cfg(feature = "tracing")]
     asimov_module::tracing::info!(

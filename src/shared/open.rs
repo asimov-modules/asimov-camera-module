@@ -1,68 +1,66 @@
 // This is free and unencumbered software released into the public domain.
 
-use super::{CameraConfig, CameraDriver, CameraError};
+use super::{CameraConfig, CameraDriver, CameraError, FrameCallback};
 
 pub fn open_camera(
     input_url: impl AsRef<str>,
     config: CameraConfig,
+    callback: FrameCallback,
 ) -> Result<Box<dyn CameraDriver>, CameraError> {
-    // Use underscore bindings so builds that compile no backend branches
-    // do not warn about unused locals.
-    let _input_url = input_url.as_ref();
-    let _config = config;
+    let input_url = input_url.as_ref();
 
-    // Android native
     #[cfg(all(feature = "android", target_os = "android"))]
     {
-        return Ok(Box::new(
-            super::drivers::android::AndroidCameraDriver::open(_input_url, _config)?,
-        ));
+        let driver =
+            super::drivers::android::AndroidCameraDriver::open(input_url, config, callback)?;
+        return Ok(Box::new(driver));
     }
 
-    // Apple native
     #[cfg(all(feature = "avf", any(target_os = "ios", target_os = "macos")))]
     {
-        return Ok(Box::new(
-            super::drivers::avf::AvfCameraDriver::open(_input_url, _config)?,
-        ));
+        let driver = super::drivers::avf::AvfCameraDriver::open(input_url, config, callback)?;
+        return Ok(Box::new(driver));
     }
 
-    // Windows native
     #[cfg(all(feature = "dshow", target_os = "windows"))]
     {
-        return Ok(Box::new(super::drivers::dshow::DshowCameraDriver { config: _config }));
+        let driver = super::drivers::dshow::DshowCameraDriver::open(input_url, config, callback)?;
+        return Ok(Box::new(driver));
     }
 
-    // Linux native
     #[cfg(all(feature = "v4l2", target_os = "linux"))]
     {
-        return Ok(Box::new(super::drivers::v4l2::V4l2CameraDriver { config: _config }));
+        let driver = super::drivers::v4l2::V4l2CameraDriver::open(input_url, config, callback)?;
+        return Ok(Box::new(driver));
     }
 
-    // FFmpeg fallback (only when no native backend is compiled for this target)
     #[cfg(all(
         feature = "ffmpeg",
+        any(target_os = "macos", target_os = "linux", target_os = "windows"),
         not(all(feature = "android", target_os = "android")),
         not(all(feature = "avf", any(target_os = "ios", target_os = "macos"))),
         not(all(feature = "dshow", target_os = "windows")),
         not(all(feature = "v4l2", target_os = "linux")),
     ))]
     {
-        return Ok(Box::new(super::drivers::ffmpeg::FfmpegCameraDriver {
-            config: _config,
-            process: None,
-        }));
+        let driver = super::drivers::ffmpeg::FfmpegCameraDriver::open(input_url, config, callback)?;
+        return Ok(Box::new(driver));
     }
 
-    // No backend available at all (this function only compiles in that case)
     #[cfg(all(
         not(all(feature = "android", target_os = "android")),
         not(all(feature = "avf", any(target_os = "ios", target_os = "macos"))),
         not(all(feature = "dshow", target_os = "windows")),
         not(all(feature = "v4l2", target_os = "linux")),
-        not(feature = "ffmpeg"),
+        not(all(
+            feature = "ffmpeg",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        )),
     ))]
     {
+        let _ = callback;
+        let _ = input_url;
+        let _ = config;
         Err(CameraError::NoDriver)
     }
 }

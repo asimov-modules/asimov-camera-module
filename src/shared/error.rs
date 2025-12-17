@@ -44,10 +44,7 @@ pub enum CameraError {
 
 impl CameraError {
     #[inline]
-    pub fn driver(
-        context: &'static str,
-        source: impl StdError + Send + Sync + 'static,
-    ) -> Self {
+    pub fn driver(context: &'static str, source: impl StdError + Send + Sync + 'static) -> Self {
         Self::DriverError {
             context,
             source: Box::new(source),

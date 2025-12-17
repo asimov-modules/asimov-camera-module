@@ -40,7 +40,13 @@ pub struct Frame {
 
 impl Frame {
     #[inline]
-    pub fn new(data: Vec<u8>, width: u32, height: u32, stride: u32, pixel_format: PixelFormat) -> Self {
+    pub fn new(
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        stride: u32,
+        pixel_format: PixelFormat,
+    ) -> Self {
         Self {
             data,
             width,

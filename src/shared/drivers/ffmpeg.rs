@@ -1,17 +1,27 @@
 // This is free and unencumbered software released into the public domain.
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-compile_error!("FFmpeg camera driver currently supports only macOS, Linux and Windows.");
-
-use crate::core::{Error, Result};
-use crate::shared::{CameraConfig, CameraDriver, CameraError};
+use crate::shared::{CameraConfig, CameraDriver, CameraError, Frame, FrameCallback};
 use alloc::borrow::Cow;
-use std::process::{Child, Command, Stdio};
+use std::{
+    io::Read,
+    process::{Child, Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-#[derive(Debug, Default)]
 pub struct FfmpegCameraDriver {
     pub config: CameraConfig,
     pub process: Option<Child>,
+    callback: Option<FrameCallback>,
+}
+
+impl core::fmt::Debug for FfmpegCameraDriver {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FfmpegCameraDriver")
+            .field("config", &self.config)
+            .field("process", &self.process.as_ref().map(|_| "<child>"))
+            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
+            .finish()
+    }
 }
 
 impl dogma::Named for FfmpegCameraDriver {
@@ -20,22 +30,79 @@ impl dogma::Named for FfmpegCameraDriver {
     }
 }
 
+impl FfmpegCameraDriver {
+    pub fn open(
+        _input_url: impl AsRef<str>,
+        config: CameraConfig,
+        callback: FrameCallback,
+    ) -> Result<Self, CameraError> {
+        Ok(Self {
+            config,
+            process: None,
+            callback: Some(callback),
+        })
+    }
+
+    #[inline]
+    fn now_ns_best_effort() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    }
+}
+
 impl CameraDriver for FfmpegCameraDriver {
     fn start(&mut self) -> Result<(), CameraError> {
-        self.process = spawn_reader(&self.config).ok();
+        let mut cb = self.callback.take().ok_or(CameraError::NotConfigured)?;
+
+        let mut child = spawn_reader(&self.config)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CameraError::other("ffmpeg stdout not piped"))?;
+
+        let width = self.config.width;
+        let height = self.config.height;
+        let stride = width.saturating_mul(3);
+        let frame_size = (stride as usize).saturating_mul(height as usize);
+
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut buf = vec![0u8; frame_size];
+
+            loop {
+                match reader.read_exact(&mut buf) {
+                    Ok(()) => {
+                        let ts = Self::now_ns_best_effort();
+                        let frame = Frame::new_rgb8(buf.clone(), width, height, stride)
+                            .with_timestamp_ns(ts);
+                        (cb)(frame);
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        self.process = Some(child);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), CameraError> {
+        if let Some(mut child) = self.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         Ok(())
     }
 }
 
 /// Spawn FFmpeg configured to read raw RGB frames from the camera and write them to stdout.
-///
-/// The child process is configured to:
-///   - use platform-specific input format (`ffmpeg_format()`)
-///   - use the correct input device mapping (`get_input_device`)
-///   - output `rgb24` rawvideo frames to `pipe:1`
-pub fn spawn_reader(config: &CameraConfig) -> Result<Child> {
+fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
     let input_device = get_input_device(&config.device);
 
+    // TODO: honor config.fps (currently hard-coded)
     const INPUT_FRAMERATE: u32 = 30;
 
     let mut ffargs: Vec<String> = vec![
@@ -86,7 +153,7 @@ pub fn spawn_reader(config: &CameraConfig) -> Result<Child> {
         .stderr(Stdio::inherit());
 
     cmd.spawn()
-        .map_err(|e| Error::FfmpegSpawn(format!("failed to spawn ffmpeg: {e}")))
+        .map_err(|e| CameraError::driver("spawning ffmpeg", e))
 }
 
 #[cfg(target_os = "macos")]

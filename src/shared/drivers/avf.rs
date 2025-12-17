@@ -1,6 +1,6 @@
 // This is free and unencumbered software released into the public domain.
 
-use crate::shared::{CameraConfig, CameraDriver, CameraError};
+use crate::shared::{CameraConfig, CameraDriver, CameraError, FrameCallback};
 use alloc::borrow::Cow;
 use objc2::{AllocAnyThread, define_class, msg_send, rc::Retained};
 use objc2_av_foundation::{
@@ -30,7 +30,11 @@ impl dogma::Named for AvfCameraDriver {
 }
 
 impl AvfCameraDriver {
-    pub fn open(_input_url: impl AsRef<str>, config: CameraConfig) -> Result<Self, CameraError> {
+    pub fn open(
+        _input_url: impl AsRef<str>,
+        config: CameraConfig,
+        _callback: FrameCallback,
+    ) -> Result<Self, CameraError> {
         unsafe {
             let session = AVCaptureSession::new();
             let _output = AVCaptureVideoDataOutput::new();

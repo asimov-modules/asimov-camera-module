@@ -3,7 +3,8 @@
 #[cfg(not(feature = "std"))]
 compile_error!("asimov-camera-cataloger requires the 'std' feature");
 
-use asimov_camera_module::core::{self, Error, Result as CoreResult};
+use asimov_camera_module::cli;
+use asimov_camera_module::shared::CameraError;
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
 use clientele::StandardOptions;
@@ -12,9 +13,7 @@ use nokhwa::{
     utils::{CameraInfo, FrameFormat, RequestedFormat, RequestedFormatType, Resolution},
 };
 use serde_json::json;
-use std::collections::HashMap;
-use std::error::Error as StdError;
-use std::fmt::Debug;
+use std::{collections::HashMap, error::Error as StdError, fmt::Debug};
 
 /// asimov-camera-cataloger
 #[derive(Debug, Parser)]
@@ -67,29 +66,28 @@ pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
 
     let exit_code = match run_cataloger(&options) {
         Ok(()) => EX_OK,
-        Err(err) => core::handle_error(&err, &options.flags),
+        Err(err) => cli::handle_error(&err, &options.flags),
     };
 
     Ok(exit_code)
 }
 
-fn run_cataloger(options: &Options) -> CoreResult<()> {
-    core::info_user(&options.flags, "enumerating camera devices");
+fn run_cataloger(options: &Options) -> Result<(), CameraError> {
+    cli::info_user(&options.flags, "enumerating camera devices");
 
     #[cfg(target_os = "macos")]
     nokhwa::nokhwa_initialize(|_| ());
 
-    let backend = nokhwa::native_api_backend()
-        .ok_or_else(|| Error::Other("no camera backend available".to_string()))?;
+    let backend = nokhwa::native_api_backend().ok_or_else(|| CameraError::NoDriver)?;
 
     let requested =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
 
     let devices = nokhwa::query(backend)
-        .map_err(|e| Error::Other(format!("failed to query devices: {e}")))?;
+        .map_err(|e| CameraError::driver("querying camera devices via nokhwa", e))?;
 
     if devices.is_empty() {
-        core::warn_user(&options.flags, "no camera devices found");
+        cli::warn_user(&options.flags, "no camera devices found");
         return Ok(());
     }
 
@@ -102,20 +100,20 @@ fn run_cataloger(options: &Options) -> CoreResult<()> {
                 Ok(mut camera) => match camera.compatible_list_by_resolution(FrameFormat::RAWRGB) {
                     Ok(map) => Some(map),
                     Err(e) => {
-                        core::warn_user_with_error(
-                            &options.flags,
-                            "failed to query compatible formats",
-                            &e,
-                        );
+                        if options.flags.debug || options.flags.verbose >= 2 {
+                            eprintln!("WARN: failed to query compatible formats: {e}");
+                        } else if options.flags.verbose >= 1 {
+                            eprintln!("WARN: failed to query compatible formats");
+                        }
                         None
                     },
                 },
                 Err(e) => {
-                    core::warn_user_with_error(
-                        &options.flags,
-                        "failed to open camera for format query",
-                        &e,
-                    );
+                    if options.flags.debug || options.flags.verbose >= 2 {
+                        eprintln!("WARN: failed to open camera for format query: {e}");
+                    } else if options.flags.verbose >= 1 {
+                        eprintln!("WARN: failed to open camera for format query");
+                    }
                     None
                 },
             };

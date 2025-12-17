@@ -2,5 +2,5 @@
 
 extern crate alloc;
 
-pub mod core;
+pub mod cli;
 pub mod shared;

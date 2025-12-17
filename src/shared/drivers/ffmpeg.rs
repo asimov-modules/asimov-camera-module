@@ -77,7 +77,7 @@ impl CameraDriver for FfmpegCameraDriver {
                         let ts = Self::now_ns_best_effort();
                         let frame = Frame::new_rgb8(buf.clone(), width, height, stride)
                             .with_timestamp_ns(ts);
-                        (cb)(frame);
+                        cb(frame);
                     },
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(_) => break,
@@ -102,7 +102,8 @@ impl CameraDriver for FfmpegCameraDriver {
 fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
     let input_device = get_input_device(&config.device);
 
-    // TODO: honor config.fps (currently hard-coded)
+    // Intentionally hard-coded for stability for now.
+    // TODO: safely honor config.fps across platforms/backends.
     const INPUT_FRAMERATE: u32 = 30;
 
     let mut ffargs: Vec<String> = vec![
@@ -126,10 +127,6 @@ fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
     ffargs.extend([
         "-i".into(),
         input_device.clone(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-tune".into(),
-        "zerolatency".into(),
         "-pix_fmt".into(),
         "rgb24".into(),
         "-f".into(),

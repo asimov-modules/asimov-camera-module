@@ -4,7 +4,7 @@
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
-    core::{self, Error, Result as CoreResult},
+    cli,
     shared::{CameraConfig, Frame, PixelFormat, open_camera},
 };
 use asimov_module::SysexitsError::{self, *};
@@ -76,24 +76,26 @@ pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
 
     let exit_code = match run_reader(&options) {
         Ok(()) => EX_OK,
-        Err(err) => core::handle_error(&err, &options.flags),
+        Err(err) => cli::handle_error(&err, &options.flags),
     };
 
     Ok(exit_code)
 }
 
-fn run_reader(opts: &Options) -> CoreResult<()> {
-    core::info_user(&opts.flags, "starting camera reader");
+fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::CameraError> {
+    cli::info_user(&opts.flags, "starting camera reader");
 
     let quit = Arc::new(AtomicBool::new(false));
-
-    // Ctrl+C handler sets the quit flag; the main loop stops the driver.
     {
         let quit = quit.clone();
         ctrlc::set_handler(move || {
             quit.store(true, Ordering::SeqCst);
         })
-        .map_err(|e| Error::Other(format!("failed to install Ctrl+C handler: {e}")))?;
+        .map_err(|e| {
+            asimov_camera_module::shared::CameraError::other(format!(
+                "failed to install Ctrl+C handler: {e}"
+            ))
+        })?;
     }
 
     let (width, height) = opts.size;
@@ -106,7 +108,6 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
         None
     };
 
-    // Shared state used by the callback.
     let last_emit = Arc::new(Mutex::new(Instant::now()));
     let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
 
@@ -116,20 +117,17 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
     let quit_cb = quit.clone();
     let last_emit_cb = last_emit.clone();
     let last_hash_cb = last_hash.clone();
-
     let debounce_level = opts.debounce;
+
     let callback = Box::new(move |frame: Frame| {
         if quit_cb.load(Ordering::SeqCst) {
             return;
         }
 
-        // We assume FFmpeg provides RGB8 (rgb24). If backend delivers non-RGB8, skip for now.
-        // (AVF typically emits BGRA8; we can add conversion later if needed.)
         if frame.pixel_format != PixelFormat::Rgb8 {
             return;
         }
 
-        // Rate-limit emissions
         {
             let mut guard = last_emit_cb
                 .lock()
@@ -141,7 +139,7 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
             *guard = now;
         }
 
-        // Debounce
+        // Debounce (best-effort, never panic)
         if let Some(ref hasher) = hasher {
             if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
                 frame.width,
@@ -151,14 +149,12 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
                 let img_data = image::DynamicImage::ImageRgb8(img_buffer);
                 let hash = hasher.hash_image(&img_data);
 
-                let mut prev = match last_hash_cb.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
+                let mut prev = last_hash_cb
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
 
                 if let Some(ref mut prev_hash) = *prev {
-                    let dist = hash.dist(prev_hash);
-                    if dist < debounce_level as u32 {
+                    if hash.dist(prev_hash) < debounce_level as u32 {
                         return;
                     }
                     *prev_hash = hash;
@@ -168,7 +164,6 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
             }
         }
 
-        // Timestamp for ID: prefer frame timestamp if present; fallback to system time seconds.
         let ts_secs: u64 = if frame.timestamp_ns != 0 {
             frame.timestamp_ns / 1_000_000_000
         } else {
@@ -188,7 +183,7 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
 
         let json = match img.to_jsonld() {
             Ok(v) => v,
-            Err(_) => return, // best-effort: do not panic inside callback
+            Err(_) => return,
         };
 
         let mut out = io::stdout().lock();
@@ -199,9 +194,9 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
         }
     });
 
-    let mut driver = open_camera("", config, callback).map_err(|e| Error::Other(e.to_string()))?;
+    let mut driver = open_camera("", config, callback)?;
 
-    driver.start().map_err(|e| Error::Other(e.to_string()))?;
+    driver.start()?;
 
     while !quit.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(50));
@@ -210,15 +205,11 @@ fn run_reader(opts: &Options) -> CoreResult<()> {
     let _ = driver.stop();
 
     #[cfg(feature = "tracing")]
-    asimov_module::tracing::info!(
-        target: "asimov_camera_module::reader",
-        "camera reader exiting"
-    );
+    asimov_module::tracing::info!(target: "asimov_camera_module::reader", "camera reader exiting");
 
     Ok(())
 }
 
-/// Accepts "1920x1080", "1920×1080", with optional spaces. Validates reasonable ranges.
 fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
     let s = s.trim().replace('×', "x");
     let parts: Vec<&str> = s.split('x').map(|t| t.trim()).collect();

@@ -12,19 +12,19 @@ pub mod drivers {
     pub mod ffmpeg;
 
     /// Camera driver using the NDK on Android.
-    #[cfg(target_os = "android")]
+    #[cfg(all(feature = "android", target_os = "android"))]
     pub mod android;
 
     /// Camera driver using AVFoundation on iOS and macOS.
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    #[cfg(all(feature = "avf", any(target_os = "ios", target_os = "macos")))]
     pub mod avf;
 
-    /// Camera driver using Dshow on Windows.
-    #[cfg(target_os = "windows")]
+    /// Camera driver using DShow on Windows.
+    #[cfg(all(feature = "dshow", target_os = "windows"))]
     pub mod dshow;
 
     /// Camera driver using V4L2 on Linux.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "v4l2", target_os = "linux"))]
     pub mod v4l2;
 }
 

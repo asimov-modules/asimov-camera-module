@@ -101,3 +101,163 @@ pub fn info_user(_msg: &str) {}
 #[cfg(not(feature = "cli"))]
 #[inline]
 pub fn warn_user(_msg: &str) {}
+
+// This is free and unencumbered software released into the public domain.
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+pub struct AvfVideoDevice {
+    pub index: u32,
+    pub name: String,
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_avfoundation_video_devices() -> Result<Vec<AvfVideoDevice>, crate::shared::CameraError>
+{
+    use std::process::Command;
+
+    let out = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ])
+        .output()
+        .map_err(|e| crate::shared::CameraError::driver("running ffmpeg -list_devices", e))?;
+
+    // ffmpeg writes device list to stderr
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Ok(parse_avfoundation_video_devices(&stderr).unwrap_or_default())
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_preferred_device_id_usb_first() -> Result<Option<String>, crate::shared::CameraError> {
+    let usb_names = macos_usb_product_names().unwrap_or_default();
+    if usb_names.is_empty() {
+        return Ok(None);
+    }
+
+    let devices = macos_avfoundation_video_devices()?;
+    for dev in devices {
+        if usb_names
+            .iter()
+            .any(|usb| contains_case_insensitive(&dev.name, usb))
+        {
+            return Ok(Some(format!("file:/dev/video{}", dev.index)));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_usb_product_names() -> Option<Vec<String>> {
+    use std::process::Command;
+
+    let out = Command::new("ioreg")
+        .args(["-p", "IOUSB", "-l"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut names = Vec::new();
+
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(v) = extract_quoted_value(line, "\"USB Product Name\"") {
+            names.push(v);
+        } else if let Some(v) = extract_quoted_value(line, "\"kUSBProductString\"") {
+            names.push(v);
+        }
+    }
+
+    let names = dedup_preserve_order(names);
+    if names.is_empty() { None } else { Some(names) }
+}
+
+#[cfg(target_os = "macos")]
+fn parse_avfoundation_video_devices(s: &str) -> Option<Vec<AvfVideoDevice>> {
+    let mut devices = Vec::new();
+    let mut in_video = false;
+
+    for line in s.lines() {
+        if line.contains("AVFoundation video devices:") {
+            in_video = true;
+            continue;
+        }
+        if line.contains("AVFoundation audio devices:") {
+            break;
+        }
+        if !in_video {
+            continue;
+        }
+
+        let line = line.trim();
+
+        // Example: "[0] FaceTime HD Camera"
+        let Some(bracket_start) = line.find('[') else {
+            continue;
+        };
+        let Some(bracket_end) = line[bracket_start + 1..].find(']') else {
+            continue;
+        };
+
+        let idx_str = &line[bracket_start + 1..bracket_start + 1 + bracket_end];
+        let idx: u32 = match idx_str.trim().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let rest = line[bracket_start + 1 + bracket_end + 1..].trim();
+        if rest.is_empty() {
+            continue;
+        }
+
+        devices.push(AvfVideoDevice {
+            index: idx,
+            name: rest.to_string(),
+        });
+    }
+
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[cfg(target_os = "macos")]
+fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
+    if !line.contains(key) {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let rhs = line[eq + 1..].trim();
+    let first = rhs.find('"')?;
+    let rest = &rhs[first + 1..];
+    let last = rest.find('"')?;
+    Some(rest[..last].to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn dedup_preserve_order(v: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in v {
+        if !out.iter().any(|x| x == &s) {
+            out.push(s);
+        }
+    }
+    out
+}

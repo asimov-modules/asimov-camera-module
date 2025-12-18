@@ -28,9 +28,12 @@ struct Options {
     #[clap(flatten)]
     flags: StandardOptions,
 
-    /// Input camera device (e.g., "0" for /dev/video0 or device name)
-    #[arg(default_value = "file:/dev/video0")]
-    device: String,
+    /// Input camera device.
+    ///
+    /// If omitted on macOS, the reader tries to select the first USB camera
+    /// (falling back to built-in/default).
+    #[arg(long)]
+    device: Option<String>,
 
     /// Desired dimensions in WxH format (e.g. 1920x1080)
     #[arg(short, long = "size", value_parser = parse_dimensions, default_value = "640x480")]
@@ -91,11 +94,7 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
         ctrlc::set_handler(move || {
             quit.store(true, Ordering::SeqCst);
         })
-        .map_err(|e| {
-            asimov_camera_module::shared::CameraError::other(format!(
-                "failed to install Ctrl+C handler: {e}"
-            ))
-        })?;
+        .map_err(|e| asimov_camera_module::shared::CameraError::other(format!("{e}")))?;
     }
 
     let (width, height) = opts.size;
@@ -108,11 +107,19 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
         None
     };
 
+    let device_id = opts
+        .device
+        .clone()
+        .unwrap_or_else(|| auto_device_for_platform());
+
+    if opts.flags.debug || opts.flags.verbose >= 1 {
+        cli::info_user(&opts.flags, &format!("selected device: {device_id}"));
+    }
+
+    let config = CameraConfig::new(device_id.clone(), width, height, fps);
+
     let last_emit = Arc::new(Mutex::new(Instant::now()));
     let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
-
-    let device_id = opts.device.clone();
-    let config = CameraConfig::new(device_id.clone(), width, height, fps);
 
     let quit_cb = quit.clone();
     let last_emit_cb = last_emit.clone();
@@ -139,7 +146,6 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
             *guard = now;
         }
 
-        // Debounce (best-effort, never panic)
         if let Some(ref hasher) = hasher {
             if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
                 frame.width,
@@ -154,7 +160,8 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
 
                 if let Some(ref mut prev_hash) = *prev {
-                    if hash.dist(prev_hash) < debounce_level as u32 {
+                    let dist = hash.dist(prev_hash);
+                    if dist < debounce_level as u32 {
                         return;
                     }
                     *prev_hash = hash;
@@ -195,7 +202,6 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
     });
 
     let mut driver = open_camera("", config, callback)?;
-
     driver.start()?;
 
     while !quit.load(Ordering::SeqCst) {
@@ -210,6 +216,22 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
     Ok(())
 }
 
+fn auto_device_for_platform() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        cli::macos_preferred_device_id_usb_first()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "file:/dev/video0".to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "file:/dev/video0".to_string()
+    }
+}
+
+/// Accepts "1920x1080", "1920×1080", with optional spaces. Validates reasonable ranges.
 fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
     let s = s.trim().replace('×', "x");
     let parts: Vec<&str> = s.split('x').map(|t| t.trim()).collect();

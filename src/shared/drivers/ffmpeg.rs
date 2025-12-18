@@ -3,6 +3,7 @@
 use crate::shared::{CameraConfig, CameraDriver, CameraError, Frame, FrameCallback};
 use alloc::borrow::Cow;
 use std::{
+    env,
     io::Read,
     process::{Child, Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -77,7 +78,7 @@ impl CameraDriver for FfmpegCameraDriver {
                         let ts = Self::now_ns_best_effort();
                         let frame = Frame::new_rgb8(buf.clone(), width, height, stride)
                             .with_timestamp_ns(ts);
-                        cb(frame);
+                        (cb)(frame);
                     },
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(_) => break,
@@ -102,12 +103,13 @@ impl CameraDriver for FfmpegCameraDriver {
 fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
     let input_device = get_input_device(&config.device);
 
-    // Intentionally hard-coded for stability for now.
-    // TODO: safely honor config.fps across platforms/backends.
+    // Intentionally hard-coded for now (per your decision).
     const INPUT_FRAMERATE: u32 = 30;
 
     let mut ffargs: Vec<String> = vec![
         "-hide_banner".into(),
+        "-nostdin".into(),
+        "-nostats".into(),
         "-f".into(),
         ffmpeg_format().into(),
         "-loglevel".into(),
@@ -134,20 +136,14 @@ fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
         "pipe:1".into(),
     ]);
 
-    #[cfg(feature = "tracing")]
-    asimov_module::tracing::debug!(
-        target: "asimov_camera_module::driver::ffmpeg",
-        device = %input_device,
-        width = config.width,
-        height = config.height,
-        fps = config.fps,
-        "spawning ffmpeg"
-    );
+    let stderr = if env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some() {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(&ffargs)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+    cmd.args(&ffargs).stdout(Stdio::piped()).stderr(stderr);
 
     cmd.spawn()
         .map_err(|e| CameraError::driver("spawning ffmpeg", e))

@@ -199,38 +199,40 @@ fn parse_avfoundation_video_devices(s: &str) -> Option<Vec<AvfVideoDevice>> {
             continue;
         }
 
-        let line = line.trim();
-
-        // Example: "[0] FaceTime HD Camera"
-        let Some(bracket_start) = line.find('[') else {
+        // ffmpeg format (typical):
+        // "[AVFoundation indev @ 0x...] [0] FaceTime HD Camera"
+        // We want the substring starting at the second bracket group: "[0] ..."
+        let Some(pos) = line.find("] [") else {
             continue;
         };
-        let Some(bracket_end) = line[bracket_start + 1..].find(']') else {
+        let tail = &line[pos + 2..]; // starts with "[0] FaceTime..."
+        let tail = tail.trim();
+
+        if !tail.starts_with('[') {
+            continue;
+        }
+        let Some(end_bracket) = tail.find(']') else {
             continue;
         };
 
-        let idx_str = &line[bracket_start + 1..bracket_start + 1 + bracket_end];
+        let idx_str = &tail[1..end_bracket];
         let idx: u32 = match idx_str.trim().parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        let rest = line[bracket_start + 1 + bracket_end + 1..].trim();
-        if rest.is_empty() {
+        let name = tail[end_bracket + 1..].trim();
+        if name.is_empty() {
             continue;
         }
 
         devices.push(AvfVideoDevice {
             index: idx,
-            name: rest.to_string(),
+            name: name.to_string(),
         });
     }
 
-    if devices.is_empty() {
-        None
-    } else {
-        Some(devices)
-    }
+    if devices.is_empty() { None } else { Some(devices) }
 }
 
 #[cfg(target_os = "macos")]

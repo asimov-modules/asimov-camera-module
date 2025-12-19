@@ -197,7 +197,6 @@ impl CameraDriver for FfmpegCameraDriver {
             let _ = j.join();
         }
 
-        let _ = self.frame_tx.try_send(FrameMsg::Stop);
         Ok(())
     }
 

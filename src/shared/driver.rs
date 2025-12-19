@@ -5,11 +5,9 @@ use std::{
     any::Any,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
     },
     thread::JoinHandle,
-    time::Duration,
 };
 
 pub type FrameSink = Arc<dyn Fn(Frame) + Send + Sync + 'static>;
@@ -52,7 +50,6 @@ pub enum FrameMsg {
 pub struct Dispatcher {
     tx: SyncSender<FrameMsg>,
     sinks: Arc<RwLock<Vec<FrameSink>>>,
-    stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -64,26 +61,21 @@ impl Dispatcher {
     ) -> Self {
         let (tx, rx) = sync_channel::<FrameMsg>(capacity.max(1));
         let sinks: Arc<RwLock<Vec<FrameSink>>> = Arc::new(RwLock::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let sinks2 = Arc::clone(&sinks);
-        let stop2 = Arc::clone(&stop);
+        let sinks_clone = Arc::clone(&sinks);
 
         let join = std::thread::spawn(move || {
             let _ = events_tx.try_send(CameraEvent::Started { backend });
 
-            while !stop2.load(Ordering::Relaxed) {
-                match rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(FrameMsg::Frame(frame)) => {
-                        if let Ok(list) = sinks2.read() {
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    FrameMsg::Frame(frame) => {
+                        if let Ok(list) = sinks_clone.read() {
                             for s in list.iter() {
                                 (s)(frame.clone());
                             }
                         }
                     },
-                    Ok(FrameMsg::Stop) => break,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    FrameMsg::Stop => break,
                 }
             }
 
@@ -93,7 +85,6 @@ impl Dispatcher {
         Self {
             tx,
             sinks,
-            stop,
             join: Some(join),
         }
     }
@@ -109,7 +100,6 @@ impl Dispatcher {
     }
 
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
         let _ = self.tx.try_send(FrameMsg::Stop);
         if let Some(j) = self.join.take() {
             let _ = j.join();

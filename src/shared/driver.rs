@@ -4,7 +4,7 @@ use crate::shared::{CameraError, Frame};
 use std::{
     any::Any,
     sync::{
-        Arc, Mutex,
+        Arc, RwLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
     },
@@ -51,7 +51,7 @@ pub enum FrameMsg {
 
 pub struct Dispatcher {
     tx: SyncSender<FrameMsg>,
-    sinks: Arc<Mutex<Vec<FrameSink>>>,
+    sinks: Arc<RwLock<Vec<FrameSink>>>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -63,7 +63,7 @@ impl Dispatcher {
         events_tx: SyncSender<CameraEvent>,
     ) -> Self {
         let (tx, rx) = sync_channel::<FrameMsg>(capacity.max(1));
-        let sinks: Arc<Mutex<Vec<FrameSink>>> = Arc::new(Mutex::new(Vec::new()));
+        let sinks: Arc<RwLock<Vec<FrameSink>>> = Arc::new(RwLock::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let sinks2 = Arc::clone(&sinks);
@@ -75,9 +75,10 @@ impl Dispatcher {
             while !stop2.load(Ordering::Relaxed) {
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(FrameMsg::Frame(frame)) => {
-                        let list = sinks2.lock().ok().map(|g| g.clone()).unwrap_or_default();
-                        for s in list {
-                            (s)(frame.clone());
+                        if let Ok(list) = sinks2.read() {
+                            for s in list.iter() {
+                                (s)(frame.clone());
+                            }
                         }
                     },
                     Ok(FrameMsg::Stop) => break,
@@ -102,7 +103,7 @@ impl Dispatcher {
     }
 
     pub fn add_sink(&self, sink: FrameSink) {
-        if let Ok(mut g) = self.sinks.lock() {
+        if let Ok(mut g) = self.sinks.write() {
             g.push(sink);
         }
     }
@@ -133,19 +134,29 @@ pub struct Camera {
 }
 
 impl Camera {
-    #[cfg_attr(not(any(
-        all(feature = "ffmpeg", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-        all(feature = "avf",   any(target_os = "macos", target_os = "ios")),
-        all(feature = "android", target_os = "android"),
-        all(feature = "dshow",   target_os = "windows"),
-        all(feature = "v4l2",    target_os = "linux"),
-    )), allow(dead_code))]
+    #[cfg_attr(
+        not(any(
+            all(
+                feature = "ffmpeg",
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
+            ),
+            all(feature = "avf", any(target_os = "macos", target_os = "ios")),
+            all(feature = "android", target_os = "android"),
+            all(feature = "dshow", target_os = "windows"),
+            all(feature = "v4l2", target_os = "linux"),
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn new(
         driver: Box<dyn CameraDriver>,
         dispatcher: Dispatcher,
         events_rx: Receiver<CameraEvent>,
     ) -> Self {
-        Self { driver, dispatcher, events_rx }
+        Self {
+            driver,
+            dispatcher,
+            events_rx,
+        }
     }
 
     pub fn backend(&self) -> CameraBackend {

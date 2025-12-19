@@ -26,6 +26,25 @@ pub fn open_camera(
             )?;
 
             Ok(Camera::new(Box::new(driver), dispatcher, events_rx))
+        } else if #[cfg(all(feature = "ffmpeg", any(target_os = "macos", target_os = "linux", target_os = "windows")))] {
+            use super::{CameraBackend, CameraEvent, Dispatcher};
+            use std::sync::mpsc::sync_channel;
+
+            let input_url = input_url.as_ref().to_string();
+            let (events_tx, events_rx) = sync_channel::<CameraEvent>(128);
+
+            let backend = CameraBackend::Ffmpeg;
+            let dispatcher = Dispatcher::new(config.buffer_frames, backend, events_tx.clone());
+            let frame_tx = dispatcher.sender();
+
+            let driver = super::drivers::ffmpeg::FfmpegCameraDriver::open(
+                input_url,
+                config,
+                frame_tx,
+                events_tx,
+            )?;
+
+            Ok(Camera::new(Box::new(driver), dispatcher, events_rx))
         } else if #[cfg(all(feature = "avf", any(target_os = "ios", target_os = "macos")))] {
             use super::{CameraBackend, CameraEvent, Dispatcher};
             use std::sync::mpsc::sync_channel;
@@ -76,25 +95,6 @@ pub fn open_camera(
             let frame_tx = dispatcher.sender();
 
             let driver = super::drivers::v4l2::V4l2CameraDriver::open(
-                input_url,
-                config,
-                frame_tx,
-                events_tx,
-            )?;
-
-            Ok(Camera::new(Box::new(driver), dispatcher, events_rx))
-        } else if #[cfg(all(feature = "ffmpeg", any(target_os = "macos", target_os = "linux", target_os = "windows")))] {
-            use super::{CameraBackend, CameraEvent, Dispatcher};
-            use std::sync::mpsc::sync_channel;
-
-            let input_url = input_url.as_ref().to_string();
-            let (events_tx, events_rx) = sync_channel::<CameraEvent>(128);
-
-            let backend = CameraBackend::Ffmpeg;
-            let dispatcher = Dispatcher::new(config.buffer_frames, backend, events_tx.clone());
-            let frame_tx = dispatcher.sender();
-
-            let driver = super::drivers::ffmpeg::FfmpegCameraDriver::open(
                 input_url,
                 config,
                 frame_tx,

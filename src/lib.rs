@@ -2,4 +2,6 @@
 
 extern crate alloc;
 
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod shared;

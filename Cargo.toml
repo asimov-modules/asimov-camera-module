@@ -17,10 +17,17 @@ categories = ["command-line-utilities", "text-processing"] # TODO
 publish = false
 
 [features]
+# Supported today: CLI + std + ffmpeg desktop backend.
 default = ["cli", "std", "ffmpeg"]
 
-native = ["android", "avf", "dshow", "v4l2"]
-all = ["ffmpeg", "native", "pretty", "tracing"]
+# Experimental backends (compile-gated, may be stubbed at runtime).
+experimental = ["android", "avf", "dshow", "v4l2"]
+
+# Backward-compatible alias. "native" currently means "experimental native backends".
+native = ["experimental"]
+
+# "all" means: everything we can compile & wire up today (not necessarily fully implemented).
+all = ["ffmpeg", "pretty", "tracing", "experimental"]
 
 cli = ["asimov-module/cli", "std", "dep:clap", "dep:clientele"]
 std = ["asimov-module/std", "clap?/std", "clientele?/std"]

@@ -4,7 +4,8 @@
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
-    shared::{open_camera, CameraConfig, Frame, PixelFormat},
+    cli,
+    shared::{open_camera, CameraConfig, CameraError, CameraEvent, Frame, PixelFormat},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -42,12 +43,6 @@ struct Options {
     list_devices: bool,
 }
 
-#[derive(Clone, Debug)]
-struct DeviceInfo {
-    id: String,
-    name: String,
-}
-
 pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
     asimov_module::dotenv().ok();
     let args = asimov_module::args_os()?;
@@ -77,14 +72,22 @@ pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
     Ok(exit_code)
 }
 
-fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::CameraError> {
+fn run_reader(opts: &Options) -> Result<(), CameraError> {
     if opts.list_devices {
-        let devices = list_video_devices(&opts.flags)?;
+        let mut devices = cli::list_video_devices(&opts.flags)?;
+        devices.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.name.cmp(&b.name)));
         for d in devices {
-            println!("{}: {}", d.id, d.name);
+            if d.is_usb {
+                println!("{}: {} [usb]", d.id, d.name);
+            } else {
+                println!("{}: {}", d.id, d.name);
+            }
         }
         return Ok(());
     }
+
+    let verbose: u8 = opts.flags.verbose;
+    let debug: bool = opts.flags.debug;
 
     let quit = Arc::new(AtomicBool::new(false));
     {
@@ -92,24 +95,23 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
         ctrlc::set_handler(move || {
             quit2.store(true, Ordering::SeqCst);
         })
-            .map_err(|e| asimov_camera_module::shared::CameraError::other(format!("{e}")))?;
+            .map_err(|e| CameraError::other(format!("{e}")))?;
     }
 
     let (width, height) = opts.size;
     let fps = opts.frequency.max(0.1);
     let min_interval = Duration::from_secs_f64(1.0 / fps);
 
-    let hasher = (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
+    let device_id = cli::auto_select_device(&opts.flags, opts.device.clone())?
+        .unwrap_or_else(default_device_for_platform);
 
-    let device_id = match opts.device.clone() {
-        Some(d) => d,
-        None => auto_select_device(&opts.flags)?.unwrap_or_else(default_device_for_platform),
-    };
-
-    let config = CameraConfig::new(width, height, fps).with_device(device_id.clone());
+    let config = CameraConfig::new(width, height, fps)
+        .with_device(device_id.clone())
+        .with_diagnostics(debug || verbose >= 2);
 
     let last_emit = Arc::new(Mutex::new(Instant::now()));
     let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
+    let hasher = (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
 
     let quit_cb = Arc::clone(&quit);
     let last_emit_cb = Arc::clone(&last_emit);
@@ -119,10 +121,6 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
 
     let callback = Arc::new(move |frame: Frame| {
         if quit_cb.load(Ordering::SeqCst) {
-            return;
-        }
-
-        if frame.pixel_format != PixelFormat::Rgb8 {
             return;
         }
 
@@ -136,37 +134,39 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
         }
 
         if let Some(ref hasher) = hasher {
-            if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                frame.width,
-                frame.height,
-                frame.data.to_vec(),
-            ) {
-                let img_data = image::DynamicImage::ImageRgb8(img_buffer);
-                let hash = hasher.hash_image(&img_data);
+            if frame.pixel_format == PixelFormat::Rgb8 {
+                if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
+                    frame.width,
+                    frame.height,
+                    frame.data.to_vec(),
+                ) {
+                    let img_data = image::DynamicImage::ImageRgb8(img_buffer);
+                    let hash = hasher.hash_image(&img_data);
 
-                let mut prev = last_hash_cb.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(ref mut prev_hash) = *prev {
-                    if hash.dist(prev_hash) < debounce_level as u32 {
-                        return;
+                    let mut prev = last_hash_cb.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(ref mut prev_hash) = *prev {
+                        if hash.dist(prev_hash) < debounce_level as u32 {
+                            return;
+                        }
+                        *prev_hash = hash;
+                    } else {
+                        *prev = Some(hash);
                     }
-                    *prev_hash = hash;
-                } else {
-                    *prev = Some(hash);
                 }
             }
         }
 
-        let ts_secs: u64 = if frame.timestamp_ns != 0 {
-            frame.timestamp_ns / 1_000_000_000
+        let ts_ns: u64 = if frame.timestamp_ns != 0 {
+            frame.timestamp_ns
         } else {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap_or_else(|_| Duration::from_secs(0))
-                .as_secs()
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
         };
 
         let img = know::classes::Image {
-            id: Some(format!("{device_id_cb}#{ts_secs}")),
+            id: Some(format!("{device_id_cb}#{ts_ns}")),
             width: Some(frame.width as _),
             height: Some(frame.height as _),
             data: frame.data.to_vec(),
@@ -188,14 +188,60 @@ fn run_reader(opts: &Options) -> Result<(), asimov_camera_module::shared::Camera
 
     let mut cam = open_camera("", config)?;
     cam.add_sink(callback);
+
+    if debug || verbose >= 1 {
+        eprintln!("INFO: opening camera device={device_id}");
+    }
+
     cam.start()?;
 
     while !quit.load(Ordering::SeqCst) {
+        if debug || verbose >= 1 {
+            drain_events(cam.events(), debug, verbose);
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 
     let _ = cam.stop();
     Ok(())
+}
+
+fn drain_events(rx: &std::sync::mpsc::Receiver<CameraEvent>, debug: bool, verbose: u8) {
+    loop {
+        match rx.try_recv() {
+            Ok(ev) => print_event(ev, debug, verbose),
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn print_event(ev: CameraEvent, debug: bool, verbose: u8) {
+    match ev {
+        CameraEvent::Started { backend } => {
+            if debug || verbose >= 1 {
+                eprintln!("INFO: camera started ({backend:?})");
+            }
+        }
+        CameraEvent::Stopped { backend } => {
+            if debug || verbose >= 1 {
+                eprintln!("INFO: camera stopped ({backend:?})");
+            }
+        }
+        CameraEvent::FrameDropped { backend } => {
+            if debug || verbose >= 2 {
+                eprintln!("WARN: frame dropped ({backend:?})");
+            }
+        }
+        CameraEvent::Warning { backend, message } => {
+            if debug || verbose >= 1 {
+                eprintln!("WARN: {backend:?}: {message}");
+            }
+        }
+        CameraEvent::Error { backend, error } => {
+            eprintln!("ERROR: {backend:?}: {error}");
+        }
+    }
 }
 
 fn default_device_for_platform() -> String {
@@ -215,182 +261,6 @@ fn default_device_for_platform() -> String {
     {
         "file:/dev/video0".to_string()
     }
-}
-
-fn auto_select_device(flags: &StandardOptions) -> Result<Option<String>, asimov_camera_module::shared::CameraError> {
-    let devices = list_video_devices(flags)?;
-    if devices.is_empty() {
-        return Ok(None);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let usb_names = macos_usb_product_names().unwrap_or_default();
-        if !usb_names.is_empty() {
-            for d in &devices {
-                if usb_names.iter().any(|u| contains_case_insensitive(&d.name, u)) {
-                    return Ok(Some(d.id.clone()));
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        for d in &devices {
-            if contains_case_insensitive(&d.name, "usb") {
-                return Ok(Some(d.id.clone()));
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        for d in &devices {
-            if contains_case_insensitive(&d.name, "usb") {
-                return Ok(Some(d.id.clone()));
-            }
-        }
-    }
-
-    Ok(Some(devices[0].id.clone()))
-}
-
-fn list_video_devices(_flags: &StandardOptions) -> Result<Vec<DeviceInfo>, asimov_camera_module::shared::CameraError> {
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
-            .output()
-            .map_err(|e| asimov_camera_module::shared::CameraError::driver("running ffmpeg -list_devices", e))?;
-
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let mut devices = Vec::new();
-        let mut in_video = false;
-
-        for line in stderr.lines() {
-            if line.contains("AVFoundation video devices:") {
-                in_video = true;
-                continue;
-            }
-            if line.contains("AVFoundation audio devices:") {
-                break;
-            }
-            if !in_video {
-                continue;
-            }
-            let Some(pos) = line.find("] [") else { continue };
-            let tail = line[pos + 2..].trim();
-            if !tail.starts_with('[') {
-                continue;
-            }
-            let Some(end_bracket) = tail.find(']') else { continue };
-            let idx_str = tail[1..end_bracket].trim();
-            let idx: u32 = match idx_str.parse() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let name = tail[end_bracket + 1..].trim();
-            if name.is_empty() {
-                continue;
-            }
-            devices.push(DeviceInfo {
-                id: format!("avf:{idx}"),
-                name: name.to_string(),
-            });
-        }
-
-        return Ok(devices);
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let out = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-f", "v4l2", "-list_devices", "true", "-i", "dummy"])
-            .output()
-            .unwrap_or_else(|_| Default::default());
-        let _ = out;
-        return Ok(vec![DeviceInfo { id: "file:/dev/video0".to_string(), name: "/dev/video0".to_string() }]);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let out = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
-            .output()
-            .unwrap_or_else(|_| Default::default());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let mut devices = Vec::new();
-
-        for line in stderr.lines() {
-            let s = line.trim();
-            if let Some(name) = s.strip_prefix("\"").and_then(|r| r.strip_suffix("\"")) {
-                if !name.is_empty() {
-                    devices.push(DeviceInfo {
-                        id: format!("dshow:video={name}"),
-                        name: name.to_string(),
-                    });
-                }
-            }
-        }
-
-        if devices.is_empty() {
-            devices.push(DeviceInfo { id: "dshow:video=default".to_string(), name: "default".to_string() });
-        }
-
-        return Ok(devices);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        Ok(Vec::new())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_usb_product_names() -> Option<Vec<String>> {
-    let out = std::process::Command::new("ioreg").args(["-p", "IOUSB", "-l"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut names = Vec::new();
-
-    for line in s.lines() {
-        let line = line.trim();
-        if let Some(v) = extract_quoted_value(line, "\"USB Product Name\"") {
-            names.push(v);
-        } else if let Some(v) = extract_quoted_value(line, "\"kUSBProductString\"") {
-            names.push(v);
-        }
-    }
-
-    let mut out = Vec::new();
-    for s in names {
-        if !out.iter().any(|x| x == &s) {
-            out.push(s);
-        }
-    }
-
-    if out.is_empty() { None } else { Some(out) }
-}
-
-#[cfg(target_os = "macos")]
-fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
-    if !line.contains(key) {
-        return None;
-    }
-    let eq = line.find('=')?;
-    let rhs = line[eq + 1..].trim();
-    let first = rhs.find('"')?;
-    let rest = &rhs[first + 1..];
-    let last = rest.find('"')?;
-    Some(rest[..last].to_string())
-}
-
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {

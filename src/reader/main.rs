@@ -4,8 +4,8 @@
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
-    core::{self, Error, Result as CoreResult},
-    shared::{CameraConfig, drivers::ffmpeg, open_camera},
+    cli,
+    shared::{CameraConfig, CameraError, CameraEvent, Frame, PixelFormat, open_camera},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -14,8 +14,7 @@ use image_hasher::{HashAlg, HasherConfig};
 use know::traits::ToJsonLd;
 use std::{
     error::Error as StdError,
-    io::{self, Read, Write},
-    process::Child,
+    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -23,206 +22,248 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// asimov-camera-reader
 #[derive(Debug, Parser)]
 struct Options {
     #[clap(flatten)]
     flags: StandardOptions,
 
-    /// Input camera device (e.g., "0" for /dev/video0 or device name)
-    #[arg(default_value = "file:/dev/video0")]
-    device: String,
+    #[arg(long)]
+    device: Option<String>,
 
-    /// Desired dimensions in WxH format (e.g. 1920x1080)
     #[arg(short, long = "size", value_parser = parse_dimensions, default_value = "640x480")]
     size: (u32, u32),
 
-    /// Sampling frequency in Hz (frames per second)
     #[arg(short, long, value_parser = parse_frequency, default_value = "30")]
     frequency: f64,
 
-    /// Debounce level. Repeat for stricter debouncing.
-    ///
-    /// Debouncing is implemented as a similarity comparison to the previously
-    /// emitted image's perceptual hash.
     #[clap(short = 'D', long, action = clap::ArgAction::Count)]
     debounce: u8,
+
+    #[arg(long)]
+    list_devices: bool,
 }
 
 pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
-    // Load environment variables from `.env`:
     asimov_module::dotenv().ok();
-
-    // Expand wildcards and @argfiles:
     let args = asimov_module::args_os()?;
-
-    // Parse command-line options:
     let options = Options::parse_from(args);
 
-    // Handle the `--version` flag:
     if options.flags.version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(EX_OK);
     }
 
-    // Handle the `--license` flag:
     if options.flags.license {
         print!("{}", include_str!("../../UNLICENSE"));
         return Ok(EX_OK);
     }
 
-    // Configure logging & tracing:
     #[cfg(feature = "tracing")]
     asimov_module::init_tracing_subscriber(&options.flags).expect("failed to initialize logging");
 
     let exit_code = match run_reader(&options) {
         Ok(()) => EX_OK,
-        Err(err) => core::handle_error(&err, &options.flags),
+        Err(err) => {
+            eprintln!("ERROR: {err}");
+            EX_SOFTWARE
+        },
     };
 
     Ok(exit_code)
 }
 
-fn run_reader(opts: &Options) -> CoreResult<()> {
-    core::info_user(&opts.flags, "starting camera reader");
+fn run_reader(opts: &Options) -> Result<(), CameraError> {
+    if opts.list_devices {
+        let mut devices = cli::list_video_devices(&opts.flags)?;
+        devices.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.name.cmp(&b.name)));
+        for d in devices {
+            if d.is_usb {
+                println!("{}: {} [usb]", d.id, d.name);
+            } else {
+                println!("{}: {}", d.id, d.name);
+            }
+        }
+        return Ok(());
+    }
+
+    let verbose: u8 = opts.flags.verbose;
+    let debug: bool = opts.flags.debug;
 
     let quit = Arc::new(AtomicBool::new(false));
-    let child_holder: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
-
     {
-        let quit = quit.clone();
-        let child_holder = child_holder.clone();
+        let quit2 = Arc::clone(&quit);
         ctrlc::set_handler(move || {
-            quit.store(true, Ordering::SeqCst);
-            if let Ok(mut guard) = child_holder.lock() {
-                if let Some(child) = guard.as_mut() {
-                    let _ = child.kill();
-                }
-            }
+            quit2.store(true, Ordering::SeqCst);
         })
-        .map_err(|e| Error::Other(format!("failed to install Ctrl+C handler: {e}")))?;
+        .map_err(|e| CameraError::other(format!("{e}")))?;
     }
 
     let (width, height) = opts.size;
-    let fps = opts.frequency;
-
+    let fps = opts.frequency.max(0.1);
     let min_interval = Duration::from_secs_f64(1.0 / fps);
 
-    let mut last_hash: Option<image_hasher::ImageHash> = None;
-    let hasher = if opts.debounce > 0 {
-        Some(HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher())
-    } else {
-        None
-    };
+    let device_id = cli::auto_select_device(&opts.flags, opts.device.clone())?
+        .unwrap_or_else(default_device_for_platform);
 
-    let config = CameraConfig::new(opts.device.clone(), width, height, fps);
+    let config = CameraConfig::new(width, height, fps)
+        .with_device(device_id.clone())
+        .with_diagnostics(debug || verbose >= 2);
 
-    let child = ffmpeg::spawn_reader(&config)?;
-    *child_holder
-        .lock()
-        .map_err(|_| Error::Other("failed to lock child holder".into()))? = Some(child);
+    let last_emit = Arc::new(Mutex::new(Instant::now()));
+    let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
+    let hasher =
+        (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
 
-    let mut child = child_holder
-        .lock()
-        .map_err(|_| Error::Other("failed to lock child holder".into()))?
-        .take()
-        .ok_or_else(|| Error::Other("ffmpeg child missing from holder".into()))?;
+    let quit_cb = Arc::clone(&quit);
+    let last_emit_cb = Arc::clone(&last_emit);
+    let last_hash_cb = Arc::clone(&last_hash);
+    let debounce_level = opts.debounce;
+    let device_id_cb = device_id.clone();
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Other("failed to open ffmpeg stdout".into()))?;
-    let mut reader = io::BufReader::new(stdout);
-
-    let frame_size = (width * height * 3) as usize;
-    let mut buffer = vec![0u8; frame_size];
-
-    let mut out = io::stdout().lock();
-    let mut last_emit = Instant::now();
-
-    while !quit.load(Ordering::SeqCst) {
-        match reader.read_exact(&mut buffer) {
-            Ok(_) => {},
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => {
-                return Err(Error::Io {
-                    context: "reading ffmpeg output",
-                    source: e,
-                });
-            },
+    let callback = Arc::new(move |frame: Frame| {
+        if quit_cb.load(Ordering::SeqCst) {
+            return;
         }
 
-        if quit.load(Ordering::SeqCst) {
-            break;
+        {
+            let mut guard = last_emit_cb.lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            if now.duration_since(*guard) < min_interval {
+                return;
+            }
+            *guard = now;
         }
-
-        let now = Instant::now();
-        if now.duration_since(last_emit) < min_interval {
-            continue;
-        }
-        last_emit = now;
 
         if let Some(ref hasher) = hasher {
-            let img_buffer =
-                image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, buffer.clone())
-                    .ok_or_else(|| {
-                        Error::InvalidFrameSize(format!(
-                            "failed to create image buffer {width}x{height}"
-                        ))
-                    })?;
-            let img_data = image::DynamicImage::ImageRgb8(img_buffer);
-            let hash = hasher.hash_image(&img_data);
+            if frame.pixel_format == PixelFormat::Rgb8 {
+                if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
+                    frame.width,
+                    frame.height,
+                    frame.data.to_vec(),
+                ) {
+                    let img_data = image::DynamicImage::ImageRgb8(img_buffer);
+                    let hash = hasher.hash_image(&img_data);
 
-            if let Some(ref mut prev_hash) = last_hash {
-                let dist = hash.dist(prev_hash);
-                if dist < opts.debounce as u32 {
-                    continue;
+                    let mut prev = last_hash_cb.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(ref mut prev_hash) = *prev {
+                        if hash.dist(prev_hash) < debounce_level as u32 {
+                            return;
+                        }
+                        *prev_hash = hash;
+                    } else {
+                        *prev = Some(hash);
+                    }
                 }
-                *prev_hash = hash;
-            } else {
-                last_hash = Some(hash);
             }
         }
 
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs();
-
-        let img = know::classes::Image {
-            id: Some(format!("{}#{}", &opts.device, ts)),
-            width: Some(width as _),
-            height: Some(height as _),
-            data: buffer.clone(),
-            source: Some(opts.device.clone()),
+        let ts_ns: u64 = if frame.timestamp_ns != 0 {
+            frame.timestamp_ns
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
         };
 
-        let json = img.to_jsonld().map_err(|e| Error::JsonLd(e.to_string()))?;
+        let img = know::classes::Image {
+            id: Some(format!("{device_id_cb}#{ts_ns}")),
+            width: Some(frame.width as _),
+            height: Some(frame.height as _),
+            data: frame.data.to_vec(),
+            source: Some(device_id_cb.clone()),
+        };
 
-        match writeln!(&mut out, "{json}") {
-            Ok(_) => {},
-            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => break,
-            Err(err) => {
-                return Err(Error::Io {
-                    context: "writing JSON output",
-                    source: err,
-                });
-            },
+        let json = match img.to_jsonld() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let mut out = io::stdout().lock();
+        if let Err(err) = writeln!(&mut out, "{json}") {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                quit_cb.store(true, Ordering::SeqCst);
+            }
         }
+    });
+
+    let mut cam = open_camera("", config)?;
+    cam.add_sink(callback);
+
+    if debug || verbose >= 1 {
+        eprintln!("INFO: opening camera device={device_id}");
     }
 
-    let _ = child.kill();
+    cam.start()?;
 
-    #[cfg(feature = "tracing")]
-    asimov_module::tracing::info!(
-        target: "asimov_camera_module::reader",
-        "camera reader exiting"
-    );
+    while !quit.load(Ordering::SeqCst) {
+        if debug || verbose >= 1 {
+            drain_events(cam.events(), debug, verbose);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
+    let _ = cam.stop();
     Ok(())
 }
 
-/// Accepts "1920x1080", "1920×1080", with optional spaces. Validates reasonable ranges.
+fn drain_events(rx: &std::sync::mpsc::Receiver<CameraEvent>, debug: bool, verbose: u8) {
+    loop {
+        match rx.try_recv() {
+            Ok(ev) => print_event(ev, debug, verbose),
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn print_event(ev: CameraEvent, debug: bool, verbose: u8) {
+    match ev {
+        CameraEvent::Started { backend } => {
+            if debug || verbose >= 1 {
+                eprintln!("INFO: camera started ({backend:?})");
+            }
+        },
+        CameraEvent::Stopped { backend } => {
+            if debug || verbose >= 1 {
+                eprintln!("INFO: camera stopped ({backend:?})");
+            }
+        },
+        CameraEvent::FrameDropped { backend } => {
+            if debug || verbose >= 2 {
+                eprintln!("WARN: frame dropped ({backend:?})");
+            }
+        },
+        CameraEvent::Warning { backend, message } => {
+            if debug || verbose >= 1 {
+                eprintln!("WARN: {backend:?}: {message}");
+            }
+        },
+        CameraEvent::Error { backend, error } => {
+            eprintln!("ERROR: {backend:?}: {error}");
+        },
+    }
+}
+
+fn default_device_for_platform() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "avf:0".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "file:/dev/video0".to_string()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "dshow:video=default".to_string()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        "file:/dev/video0".to_string()
+    }
+}
+
 fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
     let s = s.trim().replace('×', "x");
     let parts: Vec<&str> = s.split('x').map(|t| t.trim()).collect();

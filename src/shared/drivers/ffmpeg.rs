@@ -11,8 +11,7 @@ use std::{
     io::Read,
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        Arc,
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::SyncSender,
     },
@@ -70,7 +69,9 @@ impl FfmpegCameraDriver {
     }
 
     fn stop_child(&mut self) {
-        let Some(child_arc) = self.child.take() else { return };
+        let Some(child_arc) = self.child.take() else {
+            return;
+        };
         if let Ok(mut g) = child_arc.lock() {
             terminate_child(&mut *g);
         }
@@ -119,21 +120,21 @@ impl CameraDriver for FfmpegCameraDriver {
                             Frame::new_rgb8(Bytes::copy_from_slice(&buf), width, height, stride)
                                 .with_timestamp_ns(ts);
                         try_send_frame(&frame_tx, &events_tx, CameraBackend::Ffmpeg, frame);
-                    }
+                    },
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                         let _ = events_tx.try_send(CameraEvent::Error {
                             backend: CameraBackend::Ffmpeg,
                             error: CameraError::other("ffmpeg stream ended (EOF)"),
                         });
                         break;
-                    }
+                    },
                     Err(e) => {
                         let _ = events_tx.try_send(CameraEvent::Error {
                             backend: CameraBackend::Ffmpeg,
                             error: CameraError::driver("ffmpeg read", e),
                         });
                         break;
-                    }
+                    },
                 }
             }
         });
@@ -163,7 +164,7 @@ impl CameraDriver for FfmpegCameraDriver {
                             error: CameraError::other(format!("ffmpeg exited: {}", format_exit(s))),
                         });
                         break;
-                    }
+                    },
                     Ok(None) => std::thread::sleep(Duration::from_millis(150)),
                     Err(e) => {
                         if stop2.load(Ordering::Relaxed) {
@@ -174,7 +175,7 @@ impl CameraDriver for FfmpegCameraDriver {
                             error: CameraError::driver("ffmpeg wait", e),
                         });
                         break;
-                    }
+                    },
                 }
             }
         });
@@ -226,7 +227,11 @@ fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
 
     #[cfg(not(target_os = "macos"))]
     let input_fps: f64 = {
-        let fps = if config.fps.is_finite() && config.fps > 0.1 { config.fps } else { 30.0 };
+        let fps = if config.fps.is_finite() && config.fps > 0.1 {
+            config.fps
+        } else {
+            30.0
+        };
         fps.min(240.0)
     };
 

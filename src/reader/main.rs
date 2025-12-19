@@ -5,7 +5,7 @@ compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
     cli,
-    shared::{open_camera, CameraConfig, CameraError, CameraEvent, Frame, PixelFormat},
+    shared::{CameraConfig, CameraError, CameraEvent, Frame, PixelFormat, open_camera},
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -16,8 +16,8 @@ use std::{
     error::Error as StdError,
     io::{self, Write},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -66,7 +66,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
         Err(err) => {
             eprintln!("ERROR: {err}");
             EX_SOFTWARE
-        }
+        },
     };
 
     Ok(exit_code)
@@ -95,7 +95,7 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
         ctrlc::set_handler(move || {
             quit2.store(true, Ordering::SeqCst);
         })
-            .map_err(|e| CameraError::other(format!("{e}")))?;
+        .map_err(|e| CameraError::other(format!("{e}")))?;
     }
 
     let (width, height) = opts.size;
@@ -111,7 +111,8 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
 
     let last_emit = Arc::new(Mutex::new(Instant::now()));
     let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
-    let hasher = (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
+    let hasher =
+        (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
 
     let quit_cb = Arc::clone(&quit);
     let last_emit_cb = Arc::clone(&last_emit);
@@ -222,25 +223,25 @@ fn print_event(ev: CameraEvent, debug: bool, verbose: u8) {
             if debug || verbose >= 1 {
                 eprintln!("INFO: camera started ({backend:?})");
             }
-        }
+        },
         CameraEvent::Stopped { backend } => {
             if debug || verbose >= 1 {
                 eprintln!("INFO: camera stopped ({backend:?})");
             }
-        }
+        },
         CameraEvent::FrameDropped { backend } => {
             if debug || verbose >= 2 {
                 eprintln!("WARN: frame dropped ({backend:?})");
             }
-        }
+        },
         CameraEvent::Warning { backend, message } => {
             if debug || verbose >= 1 {
                 eprintln!("WARN: {backend:?}: {message}");
             }
-        }
+        },
         CameraEvent::Error { backend, error } => {
             eprintln!("ERROR: {backend:?}: {error}");
-        }
+        },
     }
 }
 
@@ -270,14 +271,22 @@ fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
         return Err(format!("Invalid format '{s}'. Use WxH (e.g., 1920x1080)"));
     }
 
-    let width: u32 = parts[0].parse().map_err(|_| format!("Invalid width: {}", parts[0]))?;
-    let height: u32 = parts[1].parse().map_err(|_| format!("Invalid height: {}", parts[1]))?;
+    let width: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid width: {}", parts[0]))?;
+    let height: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid height: {}", parts[1]))?;
 
     if !(160..=7680).contains(&width) {
-        return Err(format!("Width {width} is out of reasonable range (160-7680)"));
+        return Err(format!(
+            "Width {width} is out of reasonable range (160-7680)"
+        ));
     }
     if !(120..=4320).contains(&height) {
-        return Err(format!("Height {height} is out of reasonable range (120-4320)"));
+        return Err(format!(
+            "Height {height} is out of reasonable range (120-4320)"
+        ));
     }
 
     Ok((width, height))
@@ -290,10 +299,14 @@ fn parse_frequency(s: &str) -> Result<f64, String> {
         return Err("Frequency must be positive".to_string());
     }
     if freq > 240.0 {
-        return Err(format!("Frequency {freq} Hz exceeds reasonable maximum (240 Hz)"));
+        return Err(format!(
+            "Frequency {freq} Hz exceeds reasonable maximum (240 Hz)"
+        ));
     }
     if freq < 0.1 {
-        return Err(format!("Frequency {freq} Hz is below reasonable minimum (0.1 Hz)"));
+        return Err(format!(
+            "Frequency {freq} Hz is below reasonable minimum (0.1 Hz)"
+        ));
     }
 
     Ok(freq)

@@ -107,7 +107,15 @@ fn macos_list_video_devices(flags: &StandardOptions) -> Result<Vec<DeviceInfo>, 
     }
 
     let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .args([
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ])
         .output()
         .map_err(|e| CameraError::driver("running ffmpeg -list_devices", e))?;
 
@@ -118,7 +126,9 @@ fn macos_list_video_devices(flags: &StandardOptions) -> Result<Vec<DeviceInfo>, 
 
     let mut devs = Vec::new();
     for d in avf {
-        let is_usb = usb_names.iter().any(|u| contains_case_insensitive(&d.name, u));
+        let is_usb = usb_names
+            .iter()
+            .any(|u| contains_case_insensitive(&d.name, u));
         devs.push(DeviceInfo {
             id: format!("avf:{}", d.index),
             name: d.name,
@@ -136,7 +146,10 @@ fn macos_prefer_usb(devices: &[DeviceInfo]) -> Option<String> {
         return None;
     }
     for d in devices {
-        if usb_names.iter().any(|u| contains_case_insensitive(&d.name, u)) {
+        if usb_names
+            .iter()
+            .any(|u| contains_case_insensitive(&d.name, u))
+        {
             return Some(d.id.clone());
         }
     }
@@ -167,13 +180,17 @@ fn parse_avfoundation_video_devices(s: &str) -> Option<Vec<AvfVideoDevice>> {
             continue;
         }
 
-        let Some(pos) = line.find("] [") else { continue };
+        let Some(pos) = line.find("] [") else {
+            continue;
+        };
         let tail = line[pos + 2..].trim();
 
         if !tail.starts_with('[') {
             continue;
         }
-        let Some(end_bracket) = tail.find(']') else { continue };
+        let Some(end_bracket) = tail.find(']') else {
+            continue;
+        };
 
         let idx_str = &tail[1..end_bracket];
         let idx: u32 = match idx_str.trim().parse() {
@@ -192,7 +209,11 @@ fn parse_avfoundation_video_devices(s: &str) -> Option<Vec<AvfVideoDevice>> {
         });
     }
 
-    if devices.is_empty() { None } else { Some(devices) }
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -308,7 +329,9 @@ fn linux_is_usb(sys_video: &std::path::Path) -> bool {
         }
     }
 
-    let uevent = fs::read_to_string(dev.join("uevent")).ok().unwrap_or_default();
+    let uevent = fs::read_to_string(dev.join("uevent"))
+        .ok()
+        .unwrap_or_default();
     let u = uevent.to_lowercase();
     u.contains("usb")
 }
@@ -322,7 +345,15 @@ fn windows_list_video_devices(flags: &StandardOptions) -> Result<Vec<DeviceInfo>
     }
 
     let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"])
+        .args([
+            "-hide_banner",
+            "-f",
+            "dshow",
+            "-list_devices",
+            "true",
+            "-i",
+            "dummy",
+        ])
         .output()
         .map_err(|e| CameraError::driver("running ffmpeg -list_devices", e))?;
 
@@ -370,5 +401,9 @@ fn extract_dshow_quoted_name(line: &str) -> Option<String> {
     let rest = &l[1..];
     let end = rest.find('"')?;
     let name = &rest[..end];
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }

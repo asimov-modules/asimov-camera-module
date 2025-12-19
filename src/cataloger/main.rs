@@ -15,7 +15,13 @@ struct Options {
     #[clap(flatten)]
     flags: StandardOptions,
 
-    #[arg(value_name = "FORMAT", short = 'o', long = "output", value_enum, default_value = "text")]
+    #[arg(
+        value_name = "FORMAT",
+        short = 'o',
+        long = "output",
+        value_enum,
+        default_value = "text"
+    )]
     output: OutputFormat,
 }
 
@@ -74,10 +80,10 @@ fn run_cataloger(options: &Options) -> Result<(), CameraError> {
                 } else {
                     println!("{}: {}", d.id, d.name);
                 }
-            }
+            },
             OutputFormat::Jsonl => {
                 println!("{}", json!({ "id": d.id, "name": d.name, "usb": d.is_usb }));
-            }
+            },
         }
     }
 

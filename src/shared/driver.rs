@@ -133,16 +133,19 @@ pub struct Camera {
 }
 
 impl Camera {
+    #[cfg_attr(not(any(
+        all(feature = "ffmpeg", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+        all(feature = "avf",   any(target_os = "macos", target_os = "ios")),
+        all(feature = "android", target_os = "android"),
+        all(feature = "dshow",   target_os = "windows"),
+        all(feature = "v4l2",    target_os = "linux"),
+    )), allow(dead_code))]
     pub(crate) fn new(
         driver: Box<dyn CameraDriver>,
         dispatcher: Dispatcher,
         events_rx: Receiver<CameraEvent>,
     ) -> Self {
-        Self {
-            driver,
-            dispatcher,
-            events_rx,
-        }
+        Self { driver, dispatcher, events_rx }
     }
 
     pub fn backend(&self) -> CameraBackend {

@@ -2,5 +2,4 @@
 
 extern crate alloc;
 
-pub mod cli;
 pub mod shared;

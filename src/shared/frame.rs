@@ -1,14 +1,10 @@
 // This is free and unencumbered software released into the public domain.
 
-/// Pixel format of a delivered frame.
-///
-/// Keep this enum small and stable; add variants only when at least one backend
-/// can reliably produce them across platforms.
+use bytes::Bytes;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
-    /// 24-bit RGB packed (R, G, B).
     Rgb8,
-    /// 32-bit BGRA packed (B, G, R, A).
     Bgra8,
 }
 
@@ -22,15 +18,9 @@ impl PixelFormat {
     }
 }
 
-/// A single video frame produced by a camera backend.
-///
-/// Invariants:
-/// - `data` owns the pixel buffer.
-/// - `stride` may be larger than `width * bytes_per_pixel` (row padding).
-/// - `timestamp_ns` is best-effort; `0` means "unknown/unset".
 #[derive(Clone, Debug)]
 pub struct Frame {
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub width: u32,
     pub height: u32,
     pub stride: u32,
@@ -41,7 +31,7 @@ pub struct Frame {
 impl Frame {
     #[inline]
     pub fn new(
-        data: Vec<u8>,
+        data: Bytes,
         width: u32,
         height: u32,
         stride: u32,
@@ -58,12 +48,12 @@ impl Frame {
     }
 
     #[inline]
-    pub fn new_rgb8(data: Vec<u8>, width: u32, height: u32, stride: u32) -> Self {
+    pub fn new_rgb8(data: Bytes, width: u32, height: u32, stride: u32) -> Self {
         Self::new(data, width, height, stride, PixelFormat::Rgb8)
     }
 
     #[inline]
-    pub fn new_bgra8(data: Vec<u8>, width: u32, height: u32, stride: u32) -> Self {
+    pub fn new_bgra8(data: Bytes, width: u32, height: u32, stride: u32) -> Self {
         Self::new(data, width, height, stride, PixelFormat::Bgra8)
     }
 
@@ -73,7 +63,6 @@ impl Frame {
         self
     }
 
-    /// Best-effort sanity check for frame metadata vs buffer size.
     #[inline]
     pub fn validate(&self) -> bool {
         let bpp = self.pixel_format.bytes_per_pixel();

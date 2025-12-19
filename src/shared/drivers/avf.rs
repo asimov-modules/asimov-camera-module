@@ -1,26 +1,16 @@
 // This is free and unencumbered software released into the public domain.
 
-use crate::shared::{CameraConfig, CameraDriver, CameraError, FrameCallback};
+use crate::shared::{
+    CameraBackend, CameraConfig, CameraDriver, CameraError, CameraEvent, FrameMsg,
+};
 use alloc::borrow::Cow;
-use objc2::{AllocAnyThread, define_class, msg_send, rc::Retained};
-use objc2_av_foundation::{
-    AVCaptureConnection, AVCaptureOutput, AVCaptureSession, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate,
-};
-use objc2_core_media::CMSampleBuffer;
-use objc2_core_video::{
-    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetDataSize,
-    CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-};
-use objc2_foundation::{NSObject, NSObjectProtocol};
+use std::{any::Any, sync::mpsc::SyncSender};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AvfCameraDriver {
-    pub config: CameraConfig,
-    session: Option<Retained<AVCaptureSession>>,
-    #[allow(unused)]
-    delegate: Option<Retained<AvfCameraDelegate>>,
+    _config: CameraConfig,
+    _frame_tx: SyncSender<FrameMsg>,
+    _events_tx: SyncSender<CameraEvent>,
 }
 
 impl dogma::Named for AvfCameraDriver {
@@ -33,88 +23,43 @@ impl AvfCameraDriver {
     pub fn open(
         _input_url: impl AsRef<str>,
         config: CameraConfig,
-        _callback: FrameCallback,
+        frame_tx: SyncSender<FrameMsg>,
+        events_tx: SyncSender<CameraEvent>,
     ) -> Result<Self, CameraError> {
-        unsafe {
-            let session = AVCaptureSession::new();
-            let _output = AVCaptureVideoDataOutput::new();
-            let delegate = AvfCameraDelegate::new();
-            session.beginConfiguration();
-            session.commitConfiguration();
-            Ok(Self {
-                config,
-                session: Some(session),
-                delegate: Some(delegate),
-            })
-        }
+        Ok(Self {
+            _config: config,
+            _frame_tx: frame_tx,
+            _events_tx: events_tx,
+        })
     }
 }
 
 impl CameraDriver for AvfCameraDriver {
+    fn backend(&self) -> CameraBackend {
+        CameraBackend::Avf
+    }
+
     fn start(&mut self) -> Result<(), CameraError> {
-        let Some(ref session) = self.session else {
-            return Err(CameraError::NoCamera); // TODO
-        };
-        unsafe {
-            session.startRunning();
-        }
-        Ok(())
+        Err(CameraError::unsupported(
+            "avfoundation backend not implemented",
+        ))
     }
 
     fn stop(&mut self) -> Result<(), CameraError> {
-        let Some(ref session) = self.session else {
-            return Ok(());
-        };
-        unsafe {
-            session.stopRunning();
-        }
-        self.session = None;
         Ok(())
     }
-}
 
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[name = "AvfCameraDelegate"]
-    #[ivars = AvfCameraDelegateVars]
-    #[derive(Debug)]
-    struct AvfCameraDelegate;
-
-    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for AvfCameraDelegate {
-        #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
-        unsafe fn capture_output_did_output_sample_buffer_from_connection(
-            &self,
-            _capture_output: &AVCaptureOutput,
-            sample_buffer: &CMSampleBuffer,
-            _connection: &AVCaptureConnection,
-        ) {
-            unsafe {
-                let Some(pixel_buffer) = CMSampleBuffer::image_buffer(sample_buffer) else {
-                    return;
-                };
-                CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
-                let _format_type = CVPixelBufferGetPixelFormatType(&pixel_buffer);
-                let _width = CVPixelBufferGetWidth(&pixel_buffer);
-                let _height = CVPixelBufferGetHeight(&pixel_buffer);
-                let _bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
-                let base_address = CVPixelBufferGetBaseAddress(&pixel_buffer);
-                let size = CVPixelBufferGetDataSize(&pixel_buffer);
-                let _data = core::slice::from_raw_parts(base_address as *mut u8, size);
-                // TODO
-            }
-            todo!()
-        }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
-);
 
-impl AvfCameraDelegate {
-    fn new() -> Retained<Self> {
-        let this = Self::alloc().set_ivars(AvfCameraDelegateVars {});
-        unsafe { msg_send![super(this), init] }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
-unsafe impl NSObjectProtocol for AvfCameraDelegate {}
-
-#[derive(Clone, Debug)]
-pub struct AvfCameraDelegateVars {}
+impl Drop for AvfCameraDriver {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}

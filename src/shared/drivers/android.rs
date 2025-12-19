@@ -36,8 +36,12 @@ pub use media_status::*;
 mod native_window;
 pub use native_window::*;
 
-use crate::shared::{CameraConfig, CameraDriver, CameraError, FrameCallback};
+use crate::shared::{
+    CameraBackend, CameraConfig, CameraDriver, CameraError, CameraEvent, Frame, FrameMsg,
+    try_send_frame,
+};
 use alloc::{borrow::Cow, ffi::CString};
+use bytes::Bytes;
 use core::{ffi::CStr, ptr::null_mut};
 use ndk_sys::{
     ACameraManager_create, ACameraManager_delete, ACameraManager_deleteCameraIdList,
@@ -45,6 +49,12 @@ use ndk_sys::{
     camera_status_t,
 };
 use scopeguard::defer;
+use std::any::Any;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::SyncSender,
+};
 
 #[link(name = "camera2ndk")]
 unsafe extern "C" {}
@@ -55,7 +65,7 @@ unsafe extern "C" {}
 #[link(name = "binder_ndk")]
 unsafe extern "C" {}
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct AndroidCameraDriver {
     pub config: CameraConfig,
     pub api_level: u32,
@@ -63,6 +73,10 @@ pub struct AndroidCameraDriver {
     pub(crate) device: CameraDevice,
     #[allow(unused)]
     pub(crate) session: Option<CameraCaptureSession>,
+
+    frame_tx: SyncSender<FrameMsg>,
+    events_tx: SyncSender<CameraEvent>,
+    running: Arc<AtomicBool>,
 }
 
 impl dogma::Named for AndroidCameraDriver {
@@ -73,7 +87,7 @@ impl dogma::Named for AndroidCameraDriver {
 
 impl Drop for AndroidCameraDriver {
     fn drop(&mut self) {
-        self.stop().ok();
+        let _ = self.stop();
     }
 }
 
@@ -81,11 +95,11 @@ impl AndroidCameraDriver {
     pub fn open(
         _input_url: impl AsRef<str>,
         config: CameraConfig,
-        _callback: FrameCallback,
+        frame_tx: SyncSender<FrameMsg>,
+        events_tx: SyncSender<CameraEvent>,
     ) -> Result<Self, CameraError> {
         unsafe {
             let api_level = android_get_device_api_level() as u32;
-            //eprintln!("android_get_device_api_level={}", api_level); // DEBUG
 
             let camera_manager = ACameraManager_create();
             defer! {
@@ -95,7 +109,6 @@ impl AndroidCameraDriver {
             let mut camera_id_list_ptr = null_mut();
             let status = ACameraManager_getCameraIdList(camera_manager, &mut camera_id_list_ptr);
             if status != camera_status_t::ACAMERA_OK {
-                assert!(status != camera_status_t::ACAMERA_ERROR_INVALID_PARAMETER);
                 return Err(CameraError::NoCamera);
             }
             defer! {
@@ -115,7 +128,13 @@ impl AndroidCameraDriver {
                 .iter()
                 .map(|p| CStr::from_ptr(*p).to_str().unwrap_or("").to_string())
                 .collect();
-            eprintln!("ACameraManager_getCameraIdList={:?}", camera_id_strings); // DEBUG
+
+            if config.diagnostics {
+                let _ = events_tx.try_send(CameraEvent::Warning {
+                    backend: CameraBackend::Android,
+                    message: format!("ACameraManager_getCameraIdList={camera_id_strings:?}"),
+                });
+            }
 
             let mut device = CameraDevice::default();
             let device_id = CString::new(camera_id_strings[0].clone()).unwrap();
@@ -126,10 +145,16 @@ impl AndroidCameraDriver {
                 &mut device.state_callbacks,
                 &mut device.handle,
             );
-            eprintln!("ACameraManager_openCamera={:?}", status); // DEBUG
+
+            if config.diagnostics {
+                let _ = events_tx.try_send(CameraEvent::Warning {
+                    backend: CameraBackend::Android,
+                    message: format!("ACameraManager_openCamera status={status:?}"),
+                });
+            }
+
             if status != camera_status_t::ACAMERA_OK {
-                assert!(status != camera_status_t::ACAMERA_ERROR_INVALID_PARAMETER);
-                return Err(CameraError::Other); // TODO
+                return Err(CameraError::NoCamera);
             }
 
             Ok(AndroidCameraDriver {
@@ -137,21 +162,47 @@ impl AndroidCameraDriver {
                 api_level,
                 device,
                 session: None,
+                frame_tx,
+                events_tx,
+                running: Arc::new(AtomicBool::new(false)),
             })
         }
+    }
+
+    fn emit_frame(&self, frame: Frame) {
+        try_send_frame(
+            &self.frame_tx,
+            &self.events_tx,
+            CameraBackend::Android,
+            frame,
+        );
     }
 }
 
 impl CameraDriver for AndroidCameraDriver {
+    fn backend(&self) -> CameraBackend {
+        CameraBackend::Android
+    }
+
     fn start(&mut self) -> Result<(), CameraError> {
         let session_output_container = CaptureSessionOutputContainer::new().unwrap();
         self.session =
             Some(CameraCaptureSession::open(&self.device, &session_output_container).unwrap()); // FIXME
-        Ok(())
+
+        Err(CameraError::unsupported(
+            "android camera backend not implemented",
+        ))
     }
 
     fn stop(&mut self) -> Result<(), CameraError> {
         self.session = None;
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

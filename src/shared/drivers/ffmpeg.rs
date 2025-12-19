@@ -1,33 +1,39 @@
 // This is free and unencumbered software released into the public domain.
 
-use crate::shared::{CameraConfig, CameraDriver, CameraError, Frame, FrameCallback};
-use alloc::borrow::Cow;
+use crate::shared::{
+    CameraBackend, CameraConfig, CameraDriver, CameraError, CameraEvent, Frame, FrameMsg,
+    try_send_frame,
+};
+use bytes::Bytes;
 use std::{
+    any::Any,
     env,
     io::Read,
     process::{Child, Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::SyncSender,
+    },
+    thread::JoinHandle,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub struct FfmpegCameraDriver {
-    pub config: CameraConfig,
-    pub process: Option<Child>,
-    callback: Option<FrameCallback>,
+    config: CameraConfig,
+    child: Option<Child>,
+    stop: Arc<AtomicBool>,
+    reader_join: Option<JoinHandle<()>>,
+    frame_tx: SyncSender<FrameMsg>,
+    events_tx: SyncSender<CameraEvent>,
 }
 
 impl core::fmt::Debug for FfmpegCameraDriver {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("FfmpegCameraDriver")
             .field("config", &self.config)
-            .field("process", &self.process.as_ref().map(|_| "<child>"))
-            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
+            .field("child", &self.child.as_ref().map(|_| "<child>"))
             .finish()
-    }
-}
-
-impl dogma::Named for FfmpegCameraDriver {
-    fn name(&self) -> Cow<'_, str> {
-        "ffmpeg".into()
     }
 }
 
@@ -35,12 +41,16 @@ impl FfmpegCameraDriver {
     pub fn open(
         _input_url: impl AsRef<str>,
         config: CameraConfig,
-        callback: FrameCallback,
+        frame_tx: SyncSender<FrameMsg>,
+        events_tx: SyncSender<CameraEvent>,
     ) -> Result<Self, CameraError> {
         Ok(Self {
             config,
-            process: None,
-            callback: Some(callback),
+            child: None,
+            stop: Arc::new(AtomicBool::new(false)),
+            reader_join: None,
+            frame_tx,
+            events_tx,
         })
     }
 
@@ -51,13 +61,55 @@ impl FfmpegCameraDriver {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
     }
+
+    fn spawn(&self) -> Result<Child, CameraError> {
+        spawn_reader(&self.config)
+    }
+
+    fn stop_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            #[cfg(unix)]
+            {
+                unsafe {
+                    let _ = libc::kill(child.id() as i32, libc::SIGTERM);
+                }
+                let start = std::time::Instant::now();
+                while start.elapsed() < Duration::from_millis(900) {
+                    if let Ok(Some(_)) = child.try_wait() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            #[cfg(windows)]
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 impl CameraDriver for FfmpegCameraDriver {
-    fn start(&mut self) -> Result<(), CameraError> {
-        let mut cb = self.callback.take().ok_or(CameraError::NotConfigured)?;
+    fn backend(&self) -> CameraBackend {
+        CameraBackend::Ffmpeg
+    }
 
-        let mut child = spawn_reader(&self.config)?;
+    fn start(&mut self) -> Result<(), CameraError> {
+        if self.child.is_some() {
+            return Ok(());
+        }
+
+        self.stop.store(false, Ordering::Relaxed);
+
+        let mut child = self.spawn()?;
         let stdout = child
             .stdout
             .take()
@@ -68,42 +120,69 @@ impl CameraDriver for FfmpegCameraDriver {
         let stride = width.saturating_mul(3);
         let frame_size = (stride as usize).saturating_mul(height as usize);
 
-        std::thread::spawn(move || {
-            let mut reader = std::io::BufReader::new(stdout);
-            let mut buf = vec![0u8; frame_size];
+        let stop = Arc::clone(&self.stop);
+        let frame_tx = self.frame_tx.clone();
+        let events_tx = self.events_tx.clone();
 
-            loop {
+        let join = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stdout);
+
+            while !stop.load(Ordering::Relaxed) {
+                let mut buf = vec![0u8; frame_size];
                 match reader.read_exact(&mut buf) {
                     Ok(()) => {
-                        let ts = Self::now_ns_best_effort();
-                        let frame = Frame::new_rgb8(buf.clone(), width, height, stride)
+                        let ts = FfmpegCameraDriver::now_ns_best_effort();
+                        let frame = Frame::new_rgb8(Bytes::from(buf), width, height, stride)
                             .with_timestamp_ns(ts);
-                        (cb)(frame);
+                        try_send_frame(&frame_tx, &events_tx, CameraBackend::Ffmpeg, frame);
                     },
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(_) => break,
+                    Err(e) => {
+                        let _ = events_tx.try_send(CameraEvent::Error {
+                            backend: CameraBackend::Ffmpeg,
+                            error: CameraError::driver("ffmpeg read", e),
+                        });
+                        break;
+                    },
                 }
             }
         });
 
-        self.process = Some(child);
+        self.reader_join = Some(join);
+        self.child = Some(child);
+
         Ok(())
     }
 
     fn stop(&mut self) -> Result<(), CameraError> {
-        if let Some(mut child) = self.process.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        self.stop.store(true, Ordering::Relaxed);
+        self.stop_child();
+        if let Some(j) = self.reader_join.take() {
+            let _ = j.join();
         }
+        let _ = self.frame_tx.try_send(FrameMsg::Stop);
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
-/// Spawn FFmpeg configured to read raw RGB frames from the camera and write them to stdout.
-fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
-    let input_device = get_input_device(&config.device);
+impl Drop for FfmpegCameraDriver {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
 
-    // Intentionally hard-coded for now (per your decision).
+fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
+    let device = config.device.as_deref().unwrap_or("").trim();
+    let input_device = get_input_device(device);
+
     const INPUT_FRAMERATE: u32 = 30;
 
     let mut ffargs: Vec<String> = vec![
@@ -128,7 +207,7 @@ fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
 
     ffargs.extend([
         "-i".into(),
-        input_device.clone(),
+        input_device,
         "-pix_fmt".into(),
         "rgb24".into(),
         "-f".into(),
@@ -136,16 +215,17 @@ fn spawn_reader(config: &CameraConfig) -> Result<Child, CameraError> {
         "pipe:1".into(),
     ]);
 
-    let stderr = if env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some() {
+    let stderr = if config.diagnostics || env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some() {
         Stdio::inherit()
     } else {
         Stdio::null()
     };
 
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(&ffargs).stdout(Stdio::piped()).stderr(stderr);
-
-    cmd.spawn()
+    Command::new("ffmpeg")
+        .args(&ffargs)
+        .stdout(Stdio::piped())
+        .stderr(stderr)
+        .spawn()
         .map_err(|e| CameraError::driver("spawning ffmpeg", e))
 }
 
@@ -166,22 +246,20 @@ fn ffmpeg_format() -> &'static str {
 
 #[cfg(target_os = "macos")]
 fn get_input_device(device: &str) -> String {
-    device
-        .strip_prefix("file:/dev/video")
-        .unwrap_or(device)
-        .to_string()
+    device.strip_prefix("avf:").unwrap_or(device).to_string()
 }
 
 #[cfg(target_os = "linux")]
 fn get_input_device(device: &str) -> String {
-    if device.chars().all(|c| c.is_ascii_digit()) {
-        format!("/dev/video{device}")
+    let d = device.strip_prefix("file:").unwrap_or(device);
+    if d.chars().all(|c| c.is_ascii_digit()) {
+        format!("/dev/video{d}")
     } else {
-        device.strip_prefix("file:").unwrap_or(device).to_string()
+        d.to_string()
     }
 }
 
 #[cfg(target_os = "windows")]
 fn get_input_device(device: &str) -> String {
-    device.to_string()
+    device.strip_prefix("dshow:").unwrap_or(device).to_string()
 }

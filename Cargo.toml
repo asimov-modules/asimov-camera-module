@@ -17,21 +17,18 @@ categories = ["command-line-utilities", "text-processing"] # TODO
 publish = false
 
 [features]
-default = ["all", "cli", "std"]
+default = ["cli", "std", "ffmpeg"]
 
-# “all” means “all optional integrations that exist today”.
-# It does not mean all backends on all platforms; those remain feature + target gated.
-all = ["ffmpeg", "pretty", "tracing"]
+native = ["android", "avf", "dshow", "v4l2"]
+all = ["ffmpeg", "native", "pretty", "tracing"]
 
 cli = ["asimov-module/cli", "std", "dep:clap", "dep:clientele"]
 std = ["asimov-module/std", "clap?/std", "clientele?/std"]
 unstable = []
 
-# UX / diagnostics
 pretty = []
 tracing = ["asimov-module/tracing", "clientele?/tracing"]
 
-# Backends (feature flags)
 ffmpeg = []
 android = ["dep:ndk-sys"]
 avf = [
@@ -54,16 +51,21 @@ ctrlc = "3.5"
 derive_more = { version = "2", features = ["display", "error", "from"] }
 dogma = { version = "0.1", features = ["traits"] }
 image = "0.25"
-image_hasher = { version = "3.0", features = ["fast_image_resize"] }
-know = { version = "0.2.11", features = ["serde"] }
-nokhwa = { version = "0.10", features = ["input-native"] }
+image_hasher = { version = "3", features = ["fast_image_resize"] }
+know = { version = "0.2", features = ["serde"] }
+#nokhwa = { version = "0.10", features = ["input-native"] }
 scopeguard = { version = "1.2", default-features = false }
-serde_json = "1.0"
-thiserror = "2.0"
+serde_json = "1"
+thiserror = "2"
+bytes = "1"
+cfg-if = "1"
 
 # Optional integrations:
 clap = { version = "4.5", default-features = false, features = ["std"], optional = true }
 clientele = { version = "0.3.8", default-features = false, features = ["clap", "std"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-sys = { version = "0.6", optional = true }
@@ -85,7 +87,7 @@ lto = "thin"
 [[bin]]
 name = "asimov-camera-reader"
 path = "src/reader/main.rs"
-required-features = ["cli", "ffmpeg"]
+required-features = ["cli"]
 
 [[bin]]
 name = "asimov-camera-cataloger"

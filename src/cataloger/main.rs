@@ -3,26 +3,18 @@
 #[cfg(not(feature = "std"))]
 compile_error!("asimov-camera-cataloger requires the 'std' feature");
 
-use asimov_camera_module::core::{self, Error, Result as CoreResult};
+use asimov_camera_module::{cli, shared::CameraError};
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
 use clientele::StandardOptions;
-use nokhwa::{
-    pixel_format::RgbFormat,
-    utils::{CameraInfo, FrameFormat, RequestedFormat, RequestedFormatType, Resolution},
-};
 use serde_json::json;
-use std::collections::HashMap;
 use std::error::Error as StdError;
-use std::fmt::Debug;
 
-/// asimov-camera-cataloger
 #[derive(Debug, Parser)]
 struct Options {
     #[clap(flatten)]
     flags: StandardOptions,
 
-    /// Output format: human-readable text or JSONL.
     #[arg(
         value_name = "FORMAT",
         short = 'o',
@@ -40,92 +32,57 @@ enum OutputFormat {
 }
 
 pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
-    // Load environment variables from `.env`:
     asimov_module::dotenv().ok();
-
-    // Expand wildcards and @argfiles:
     let args = asimov_module::args_os()?;
-
-    // Parse command-line options:
     let options = Options::parse_from(args);
 
-    // Handle the `--version` flag:
     if options.flags.version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(EX_OK);
     }
 
-    // Handle the `--license` flag:
     if options.flags.license {
         print!("{}", include_str!("../../UNLICENSE"));
         return Ok(EX_OK);
     }
 
-    // Configure logging & tracing:
     #[cfg(feature = "tracing")]
     asimov_module::init_tracing_subscriber(&options.flags).expect("failed to initialize logging");
 
     let exit_code = match run_cataloger(&options) {
         Ok(()) => EX_OK,
-        Err(err) => core::handle_error(&err, &options.flags),
+        Err(err) => handle_error(&err, &options.flags),
     };
 
     Ok(exit_code)
 }
 
-fn run_cataloger(options: &Options) -> CoreResult<()> {
-    core::info_user(&options.flags, "enumerating camera devices");
+fn run_cataloger(options: &Options) -> Result<(), CameraError> {
+    if options.flags.debug || options.flags.verbose >= 1 {
+        eprintln!("INFO: enumerating camera devices");
+    }
 
-    #[cfg(target_os = "macos")]
-    nokhwa::nokhwa_initialize(|_| ());
-
-    let backend = nokhwa::native_api_backend()
-        .ok_or_else(|| Error::Other("no camera backend available".to_string()))?;
-
-    let requested =
-        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-
-    let devices = nokhwa::query(backend)
-        .map_err(|e| Error::Other(format!("failed to query devices: {e}")))?;
-
+    let mut devices = cli::list_video_devices(&options.flags)?;
     if devices.is_empty() {
-        core::warn_user(&options.flags, "no camera devices found");
+        if options.flags.debug || options.flags.verbose >= 1 {
+            eprintln!("WARN: no camera devices found");
+        }
         return Ok(());
     }
 
-    for dev in devices {
-        let index = dev.index().clone();
-        let logical_id = logical_camera_id(&index);
+    devices.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.name.cmp(&b.name)));
 
-        let formats: Option<HashMap<Resolution, Vec<u32>>> =
-            match nokhwa::Camera::new(index.clone(), requested.clone()) {
-                Ok(mut camera) => match camera.compatible_list_by_resolution(FrameFormat::RAWRGB) {
-                    Ok(map) => Some(map),
-                    Err(e) => {
-                        core::warn_user_with_error(
-                            &options.flags,
-                            "failed to query compatible formats",
-                            &e,
-                        );
-                        None
-                    },
-                },
-                Err(e) => {
-                    core::warn_user_with_error(
-                        &options.flags,
-                        "failed to open camera for format query",
-                        &e,
-                    );
-                    None
-                },
-            };
-
+    for d in devices {
         match options.output {
             OutputFormat::Text => {
-                print_device_text(&logical_id, &dev, formats.as_ref(), &options.flags);
+                if d.is_usb {
+                    println!("{}: {} [usb]", d.id, d.name);
+                } else {
+                    println!("{}: {}", d.id, d.name);
+                }
             },
             OutputFormat::Jsonl => {
-                print_device_jsonl(&logical_id, &dev, formats.as_ref());
+                println!("{}", json!({ "id": d.id, "name": d.name, "usb": d.is_usb }));
             },
         }
     }
@@ -133,69 +90,29 @@ fn run_cataloger(options: &Options) -> CoreResult<()> {
     Ok(())
 }
 
-fn logical_camera_id(index: &nokhwa::utils::CameraIndex) -> String {
-    format!("file:/dev/video{}", index)
-}
+fn handle_error(err: &CameraError, flags: &StandardOptions) -> SysexitsError {
+    use std::error::Error as _;
+    use std::io::Write;
 
-fn print_device_text<F: Debug>(
-    logical_id: &str,
-    dev: &CameraInfo,
-    formats: Option<&HashMap<Resolution, Vec<F>>>,
-    flags: &StandardOptions,
-) {
-    println!("{logical_id}: {}", dev.human_name());
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(stderr, "ERROR: {err}");
 
-    if !(flags.debug || flags.verbose >= 1) {
-        return;
-    }
-
-    println!("\t{}", dev.description());
-    println!("\t{}", dev.misc());
-
-    if let Some(formats) = formats {
-        println!("\tAvailable formats:");
-        for (resolution, rates) in formats {
-            println!(
-                "\t\tResolution {}x{}",
-                resolution.width(),
-                resolution.height()
-            );
-            for rate in rates {
-                println!("\t\t\tFrame rate: {:?}", rate);
-            }
+    if flags.debug || flags.verbose >= 2 {
+        let mut source = err.source();
+        while let Some(cause) = source {
+            let _ = writeln!(stderr, "  Caused by: {}", cause);
+            source = cause.source();
         }
     }
-}
 
-fn print_device_jsonl<F: Debug>(
-    logical_id: &str,
-    dev: &CameraInfo,
-    formats: Option<&HashMap<Resolution, Vec<F>>>,
-) {
-    let formats_json: Vec<_> = formats
-        .into_iter()
-        .flat_map(|map| map.iter())
-        .map(|(res, rates)| {
-            let rates_json: Vec<_> = rates
-                .iter()
-                .map(|r| json!({ "value": format!("{:?}", r) }))
-                .collect();
-
-            json!({
-                "width": res.width(),
-                "height": res.height(),
-                "frame_rates": rates_json,
-            })
-        })
-        .collect();
-
-    let info = json!({
-        "id": logical_id,
-        "name": dev.human_name(),
-        "description": dev.description(),
-        "misc": dev.misc(),
-        "formats": formats_json,
-    });
-
-    println!("{info}");
+    match err {
+        CameraError::NoDriver => EX_UNAVAILABLE,
+        CameraError::NoCamera => EX_USAGE,
+        CameraError::NotConfigured => EX_CONFIG,
+        CameraError::InvalidConfig(_) => EX_USAGE,
+        CameraError::Unsupported(_) => EX_UNAVAILABLE,
+        CameraError::DriverError { .. } => EX_SOFTWARE,
+        CameraError::Other(_) => EX_SOFTWARE,
+        _ => EX_SOFTWARE,
+    }
 }

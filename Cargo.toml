@@ -2,7 +2,7 @@
 
 [package]
 name = "asimov-camera-module"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["ASIMOV Community"]
 edition = "2024"
 #rust-version = "1.85"
@@ -13,54 +13,78 @@ homepage = "https://github.com/asimov-modules"
 repository = "https://github.com/asimov-modules/asimov-camera-module"
 license = "Unlicense"
 keywords = ["asimov-module", "asimov", "ai"]
-categories = ["command-line-utilities", "text-processing"]              # TODO
+categories = ["command-line-utilities", "text-processing"] # TODO
 publish = false
 
 [features]
-default = ["all", "cli", "std"]
-all = ["ffmpeg", "pretty", "tracing"]
+# Supported today: CLI + std + ffmpeg desktop backend.
+default = ["cli", "std", "ffmpeg"]
+
+# Experimental backends (compile-gated, may be stubbed at runtime).
+experimental = ["android", "avf", "dshow", "v4l2"]
+
+# Backward-compatible alias. "native" currently means "experimental native backends".
+native = ["experimental"]
+
+# "all" means: everything we can compile & wire up today (not necessarily fully implemented).
+all = ["ffmpeg", "pretty", "tracing", "experimental"]
+
 cli = ["asimov-module/cli", "std", "dep:clap", "dep:clientele"]
 std = ["asimov-module/std", "clap?/std", "clientele?/std"]
 unstable = []
 
-# Optional features:
-ffmpeg = []
 pretty = []
 tracing = ["asimov-module/tracing", "clientele?/tracing"]
 
+ffmpeg = []
+android = ["dep:ndk-sys"]
+avf = [
+  "dep:dispatch2",
+  "dep:objc2",
+  "dep:objc2-av-foundation",
+  "dep:objc2-core-foundation",
+  "dep:objc2-core-media",
+  "dep:objc2-core-video",
+  "dep:objc2-foundation",
+]
+dshow = []
+v4l2 = []
+
 [dependencies]
+# IMPORTANT: keep std enabled for asimov-module; it currently uses std in its implementation.
 asimov-module = { version = "25", default-features = false, features = ["std"] }
+
 ctrlc = "3.5"
 derive_more = { version = "2", features = ["display", "error", "from"] }
 dogma = { version = "0.1", features = ["traits"] }
 image = "0.25"
-image_hasher = { version = "3.0", features = ["fast_image_resize"] }
-know = { version = "0.2.11", features = ["serde"] }
-nokhwa = { version = "0.10", features = ["input-native"] }
+image_hasher = { version = "3", features = ["fast_image_resize"] }
+know = { version = "0.2", features = ["serde"] }
+#nokhwa = { version = "0.10", features = ["input-native"] }
 scopeguard = { version = "1.2", default-features = false }
-serde_json = "1.0"
-thiserror = "2.0"
+serde_json = "1"
+thiserror = "2"
+bytes = "1"
+cfg-if = "1"
 
 # Optional integrations:
-clap = { version = "4.5", default-features = false, features = [
-  "std",
-], optional = true }
-clientele = { version = "0.3.8", default-features = false, features = [
-  "clap",
-  "std",
-], optional = true }
+clap = { version = "4.5", default-features = false, features = ["std"], optional = true }
+clientele = { version = "0.3.8", default-features = false, features = ["clap", "std"], optional = true }
 
-[target.'cfg(any(target_os = "android"))'.dependencies]
-ndk-sys = "0.6"
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = { version = "0.6", optional = true }
 
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
-dispatch2 = "0.3"
-objc2 = "0.6"
-objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"]}
-objc2-core-foundation = "0.3"
-objc2-core-media = "0.3"
-objc2-core-video = "0.3"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSObject"] }
+dispatch2 = { version = "0.3", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"], optional = true }
+objc2-core-foundation = { version = "0.3", optional = true }
+objc2-core-media = { version = "0.3", optional = true }
+objc2-core-video = { version = "0.3", optional = true }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSObject"], optional = true }
 
 [profile.release]
 opt-level = "z"
@@ -70,7 +94,7 @@ lto = "thin"
 [[bin]]
 name = "asimov-camera-reader"
 path = "src/reader/main.rs"
-required-features = ["cli", "ffmpeg"]
+required-features = ["cli"]
 
 [[bin]]
 name = "asimov-camera-cataloger"

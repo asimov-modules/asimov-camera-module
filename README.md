@@ -57,7 +57,7 @@ asimov-camera-cataloger --output jsonl | jq .
 Then take the `id` from the cataloger output and plug it into the reader:
 ```bash
 # Using a discovered device, e.g. "file:/dev/video2"
-asimov-camera-reader file:/dev/video2
+asimov-camera-reader <device-id>
 ```
 
 ## ⚙ Configuration
@@ -118,6 +118,11 @@ asimov-camera-reader -D        # low debounce
 asimov-camera-reader -DDD      # stricter
 ```
 
+> [!NOTE]
+> The `--frequency` option controls how often frames are **emitted** by the CLI.
+> On some platforms (notably macOS), the actual capture rate is determined by the camera
+> and FFmpeg, and the output is throttled to the requested frequency.
+
 ### `asimov-camera-cataloger`
 
 ```
@@ -137,17 +142,6 @@ Options:
 asimov-camera-cataloger
 # file:/dev/video0: Integrated Camera
 # file:/dev/video1: USB Camera
-
-asimov-camera-cataloger -v
-# file:/dev/video0: Integrated Camera
-#   <description>
-#   <misc>
-#   Available formats:
-#       Resolution 640x480
-#           Frame rate: 30 fps
-#           Frame rate: 60 fps
-#       Resolution 1280x720
-#           Frame rate: 30 fps
 ```
 
 **JSONL output**
@@ -159,18 +153,7 @@ Each line is a single device:
 {
   "id": "file:/dev/video0",
   "name": "Integrated Camera",
-  "description": "Built-in iSight",
-  "misc": "…",
-  "formats": [
-    {
-      "width": 640,
-      "height": 480,
-      "frame_rates": [
-        { "value": "30" },
-        { "value": "60" }
-      ]
-    }
-  ]
+  "usb": false
 }
 ```
 Use the `id` field with `asimov-camera-reader`.

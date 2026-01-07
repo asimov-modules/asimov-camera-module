@@ -10,7 +10,7 @@ use crate::{CameraBackend, CameraError, RawFrameRef};
 
 use crate::drivers::DriverConfig;
 
-use super::ndk::{CameraDevice, CameraManager,NativeWindow};
+use super::ndk::{CameraDevice, CameraManager, NativeWindow};
 
 mod callbacks;
 mod image_stream;

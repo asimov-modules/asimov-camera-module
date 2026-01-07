@@ -15,30 +15,19 @@ license = "Unlicense"
 keywords = ["asimov-module", "asimov", "ai"]
 categories = ["command-line-utilities", "text-processing"] # TODO
 publish = false
+build = "build.rs"
 
 [features]
-# Supported today: CLI + std + ffmpeg desktop backend.
-default = ["cli", "std", "ffmpeg"]
-
-# Experimental backends (compile-gated, may be stubbed at runtime).
-experimental = ["android", "avf", "dshow", "v4l2"]
-
-# Backward-compatible alias. "native" currently means "experimental native backends".
-native = ["experimental"]
-
-# "all" means: everything we can compile & wire up today (not necessarily fully implemented).
-all = ["ffmpeg", "pretty", "tracing", "experimental"]
-
+default = ["cli", "std", "ffmpeg", "android", "avf"]
 cli = ["asimov-module/cli", "std", "dep:clap", "dep:clientele"]
 std = ["asimov-module/std", "clap?/std", "clientele?/std"]
-unstable = []
-
 pretty = []
 tracing = ["asimov-module/tracing", "clientele?/tracing"]
-
+mobile-preview = []
 ffmpeg = []
-android = ["dep:ndk-sys"]
+android = ["mobile-preview", "dep:ndk-sys", "dep:jni"]
 avf = [
+  "mobile-preview",
   "dep:dispatch2",
   "dep:objc2",
   "dep:objc2-av-foundation",
@@ -47,39 +36,34 @@ avf = [
   "dep:objc2-core-video",
   "dep:objc2-foundation",
 ]
-dshow = []
-v4l2 = []
 
 [dependencies]
-# IMPORTANT: keep std enabled for asimov-module; it currently uses std in its implementation.
 asimov-module = { version = "25", default-features = false, features = ["std"] }
 
 ctrlc = "3.5"
-derive_more = { version = "2", features = ["display", "error", "from"] }
-dogma = { version = "0.1", features = ["traits"] }
+#dogma = { version = "0.1", features = ["traits"] }
 image = "0.25"
 image_hasher = { version = "3", features = ["fast_image_resize"] }
-know = { version = "0.2", features = ["serde"] }
-#nokhwa = { version = "0.10", features = ["input-native"] }
-scopeguard = { version = "1.2", default-features = false }
-serde_json = "1"
 thiserror = "2"
 bytes = "1"
-cfg-if = "1"
+crossbeam-channel = "0.5"
 
 # Optional integrations:
 clap = { version = "4.5", default-features = false, features = ["std"], optional = true }
 clientele = { version = "0.3.8", default-features = false, features = ["clap", "std"], optional = true }
+serde_json = "1.0.145"
+know = { version = "0.2", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-sys = { version = "0.6", optional = true }
+jni = { version = "0.21", default-features = false, optional = true }
 
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
 dispatch2 = { version = "0.3", optional = true }
-objc2 = { version = "0.6", optional = true }
+objc2 = { version = "0.6", optional = true, features = ["exception"] }
 objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"], optional = true }
 objc2-core-foundation = { version = "0.3", optional = true }
 objc2-core-media = { version = "0.3", optional = true }
@@ -93,10 +77,10 @@ lto = "thin"
 
 [[bin]]
 name = "asimov-camera-reader"
-path = "src/reader/main.rs"
+path = "src/bin/reader.rs"
 required-features = ["cli"]
 
 [[bin]]
 name = "asimov-camera-cataloger"
-path = "src/cataloger/main.rs"
+path = "src/bin/cataloger.rs"
 required-features = ["cli"]

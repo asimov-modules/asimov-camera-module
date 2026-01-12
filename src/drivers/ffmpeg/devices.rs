@@ -224,7 +224,7 @@ fn ffmpeg_list_devices_windows_dshow() -> Result<Vec<DeviceInfo>, CameraError> {
     Ok(out)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(target_os = "linux")]
 fn ffmpeg_list_devices_linux_v4l2() -> Result<Vec<DeviceInfo>, CameraError> {
     use std::fs;
     use std::path::{Path, PathBuf};

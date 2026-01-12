@@ -9,8 +9,6 @@ pub enum PixelFormat {
     Rgb8,
     /// Packed BGRA, 8-bit per channel, 4 bytes per pixel.
     Bgra8,
-    /// Planar YUV 4:2:0 (NOT currently emitted by this crate's `Frame` type).
-    I420,
 }
 
 impl PixelFormat {
@@ -19,7 +17,6 @@ impl PixelFormat {
         match self {
             PixelFormat::Rgb8 => Some(3),
             PixelFormat::Bgra8 => Some(4),
-            PixelFormat::I420 => None,
         }
     }
 }

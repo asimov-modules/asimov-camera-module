@@ -142,8 +142,6 @@ pub fn convert_raw_to_frame(raw_ref: RawFrameRef, output: PixelFormat) -> Option
                 timestamp_ns: raw.timestamp_ns,
             }))
         },
-
-        PixelFormat::I420 => None,
     }
 }
 

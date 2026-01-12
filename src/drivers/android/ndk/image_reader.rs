@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#![allow(dead_code)]
-
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
@@ -55,11 +53,6 @@ impl ImageReader {
         self.handle
     }
 
-    #[inline]
-    pub fn is_null(&self) -> bool {
-        self.handle.is_null()
-    }
-
     pub fn get_window(&self) -> MediaResult<NativeWindow> {
         if self.handle.is_null() {
             return Err(media_status_t::AMEDIA_ERROR_INVALID_PARAMETER.into());
@@ -104,19 +97,6 @@ impl ImageReader {
         unsafe { acquire_latest_image_from_raw(self.handle) }
     }
 
-    pub fn get_format(&self) -> MediaResult<i32> {
-        if self.handle.is_null() {
-            return Err(media_status_t::AMEDIA_ERROR_INVALID_PARAMETER.into());
-        }
-
-        let mut result = 0;
-        let status = unsafe { AImageReader_getFormat(self.handle, &mut result) };
-        if status != media_status_t::AMEDIA_OK {
-            return Err(status.into());
-        }
-        Ok(result)
-    }
-
     pub fn get_width(&self) -> MediaResult<u32> {
         if self.handle.is_null() {
             return Err(media_status_t::AMEDIA_ERROR_INVALID_PARAMETER.into());
@@ -141,10 +121,6 @@ impl ImageReader {
             return Err(status.into());
         }
         Ok(result as _)
-    }
-
-    pub fn get_dimensions(&self) -> MediaResult<(u32, u32)> {
-        Ok((self.get_width()?, self.get_height()?))
     }
 
     pub fn close(&mut self) {

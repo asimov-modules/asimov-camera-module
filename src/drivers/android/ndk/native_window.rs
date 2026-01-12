@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#![allow(dead_code)]
-
 use core::ptr::null_mut;
 use ndk_sys as ndk;
 
@@ -50,11 +48,6 @@ impl NativeWindow {
         self.handle
     }
 
-    #[inline]
-    pub fn is_null(&self) -> bool {
-        self.handle.is_null()
-    }
-
     pub fn width(&self) -> i32 {
         if self.handle.is_null() {
             return 0;
@@ -81,13 +74,6 @@ impl NativeWindow {
             return -1;
         }
         unsafe { ndk::ANativeWindow_setBuffersGeometry(self.handle, width, height, format) }
-    }
-
-    pub fn into_raw(mut self) -> *mut ndk::ANativeWindow {
-        self.owned = false;
-        let p = self.handle;
-        self.handle = null_mut();
-        p
     }
 }
 

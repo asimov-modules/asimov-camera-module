@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#![allow(dead_code)]
-
 use core::ptr::null_mut;
 use ndk_sys as ndk;
 

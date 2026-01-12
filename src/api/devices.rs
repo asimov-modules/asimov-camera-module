@@ -76,42 +76,6 @@ pub fn default_device() -> Result<Option<DeviceInfo>, CameraError> {
     Ok(pick_preferred_device(&devices))
 }
 
-pub fn select_kind_strict(kind: DeviceKind) -> Result<String, CameraError> {
-    if kind == DeviceKind::Unknown {
-        return Err(CameraError::invalid_config(
-            "DeviceKind::Unknown is not selectable",
-        ));
-    }
-
-    let devices = list_video_devices()?;
-    if let Some(d) = devices.iter().find(|d| d.kind == kind) {
-        return Ok(d.id.clone());
-    }
-
-    let label = match kind {
-        DeviceKind::External => "external",
-        DeviceKind::Front => "front",
-        DeviceKind::Back => "back",
-        DeviceKind::Unknown => "unknown",
-    };
-
-    Err(CameraError::other(format!(
-        "no {label} camera found; call list_video_devices() to inspect available devices"
-    )))
-}
-
-pub fn require_device_id(id: &str) -> Result<String, CameraError> {
-    let s = id.trim();
-    if s.is_empty() {
-        return Err(CameraError::invalid_config("device id is empty"));
-    }
-    Ok(s.to_string())
-}
-
-pub fn normalize_device_id(raw: &str) -> String {
-    raw.trim().to_string()
-}
-
 fn is_screen_capture_like(d: &DeviceInfo) -> bool {
     let name = d.name().trim().to_ascii_lowercase();
     let id = d.id().trim().to_ascii_lowercase();

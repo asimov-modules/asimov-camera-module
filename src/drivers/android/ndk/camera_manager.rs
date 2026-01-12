@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#![allow(dead_code)]
-
 use core::ffi::c_char;
 use core::ptr::null_mut;
 use ndk_sys as ndk;
@@ -20,16 +18,6 @@ pub struct CameraIdList {
 }
 
 impl CameraIdList {
-    #[inline]
-    pub fn as_ptr(&self) -> *mut ndk::ACameraIdList {
-        self.handle
-    }
-
-    #[inline]
-    pub fn is_null(&self) -> bool {
-        self.handle.is_null()
-    }
-
     #[inline]
     pub fn len(&self) -> usize {
         if self.handle.is_null() {

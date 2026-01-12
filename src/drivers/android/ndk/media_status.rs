@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#![allow(dead_code)]
-
 use core::fmt;
 use ndk_sys::media_status_t;
 

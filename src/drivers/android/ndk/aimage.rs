@@ -1,7 +1,5 @@
 // This is free and unencumbered software released into the public domain.
 
-#![allow(dead_code)]
-
 use core::ptr::null_mut;
 use ndk_sys::{
     AImage, AImage_delete, AImage_getFormat, AImage_getHeight, AImage_getPlaneData,

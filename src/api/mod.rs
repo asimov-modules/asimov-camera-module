@@ -12,9 +12,6 @@ pub use devices::*;
 mod error;
 pub use error::*;
 
-mod event;
-pub use event::*;
-
 mod frame;
 pub use frame::*;
 

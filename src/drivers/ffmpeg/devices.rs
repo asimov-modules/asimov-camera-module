@@ -161,6 +161,7 @@ fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
     Some(rest[..last].to_string())
 }
 
+#[cfg(target_os = "windows")]
 fn ffmpeg_list_devices_windows_dshow() -> Result<Vec<DeviceInfo>, CameraError> {
     let (_code, _stdout, stderr) = run_ffmpeg(&[
         "-hide_banner",
@@ -223,6 +224,7 @@ fn ffmpeg_list_devices_windows_dshow() -> Result<Vec<DeviceInfo>, CameraError> {
     Ok(out)
 }
 
+#[cfg(target_os = "windows")]
 fn ffmpeg_list_devices_linux_v4l2() -> Result<Vec<DeviceInfo>, CameraError> {
     use std::fs;
     use std::path::{Path, PathBuf};

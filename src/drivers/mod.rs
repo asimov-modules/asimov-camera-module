@@ -17,6 +17,12 @@ pub mod ffmpeg;
 mod config;
 pub use config::*;
 
+#[cfg(any(
+    all(feature = "android", target_os = "android"),
+    all(feature = "avf", any(target_os = "ios", target_os = "macos"))
+))]
+pub(crate) mod resolution;
+
 pub trait CameraDriver {
     fn backend(&self) -> CameraBackend;
 

@@ -15,10 +15,11 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, Message, define_class, msg_send, rc::Retained,
 };
 use objc2_av_foundation::{
-    AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceInput,
-    AVCaptureDevicePosition, AVCaptureDeviceType, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-    AVCaptureDeviceTypeExternal, AVCaptureOutput, AVCaptureSession, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+    AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat,
+    AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceType,
+    AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeExternal, AVCaptureOutput,
+    AVCaptureSession, AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate,
+    AVMediaTypeVideo,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
@@ -244,31 +245,53 @@ impl AvfDriver {
 
         let res = (|| -> Result<(), CameraError> {
             let formats = unsafe { device.formats() };
-            let mut best_format = None;
+
+            // Prefer resolutions that can also hit the desired fps; fall back
+            // to any resolution if none can, rather than silently doing
+            // nothing (the old behavior when no *exact* size match existed).
+            let mut fps_capable: Vec<(u32, u32)> = Vec::new();
+            let mut all_dims: Vec<(u32, u32)> = Vec::new();
 
             for format in formats.iter() {
-                let desc = unsafe { format.formatDescription() };
-                let dims =
-                    unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(&desc) };
-
-                if dims.width as u32 != cfg.width || dims.height as u32 != cfg.height {
+                let Some((w, h)) = format_dims(&format) else {
                     continue;
-                }
-
-                for range in unsafe { format.videoSupportedFrameRateRanges() } {
-                    let max_rate = unsafe { range.maxFrameRate() };
-                    if cfg.fps <= 0.0 || max_rate >= cfg.fps {
-                        best_format = Some(format);
-                        break;
-                    }
-                }
-
-                if best_format.is_some() {
-                    break;
+                };
+                all_dims.push((w, h));
+                if format_supports_fps(&format, cfg.fps) {
+                    fps_capable.push((w, h));
                 }
             }
 
-            if let Some(fmt) = best_format {
+            let candidates = if fps_capable.is_empty() {
+                &all_dims
+            } else {
+                &fps_capable
+            };
+
+            let Some(best_dims) = crate::drivers::resolution::pick_nearest_resolution(
+                (cfg.width, cfg.height),
+                candidates,
+            ) else {
+                return Ok(());
+            };
+
+            // Among formats at the chosen resolution, prefer one that
+            // supports the desired fps; otherwise take the first match.
+            let mut chosen = None;
+            for format in formats.iter() {
+                if format_dims(&format) != Some(best_dims) {
+                    continue;
+                }
+                if format_supports_fps(&format, cfg.fps) {
+                    chosen = Some(format);
+                    break;
+                }
+                if chosen.is_none() {
+                    chosen = Some(format);
+                }
+            }
+
+            if let Some(fmt) = chosen {
                 unsafe { device.setActiveFormat(&fmt) };
 
                 if cfg.fps.is_finite() && cfg.fps > 0.0 {
@@ -501,4 +524,23 @@ fn cm_time_to_ns(t: CMTime) -> u64 {
         .saturating_div(ts_u128);
 
     ns.min(u64::MAX as u128) as u64
+}
+
+fn format_dims(format: &AVCaptureDeviceFormat) -> Option<(u32, u32)> {
+    let desc = unsafe { format.formatDescription() };
+    let dims = unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(&desc) };
+    let (w, h) = (dims.width as u32, dims.height as u32);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+fn format_supports_fps(format: &AVCaptureDeviceFormat, fps: f64) -> bool {
+    if fps <= 0.0 {
+        return true;
+    }
+    for range in unsafe { format.videoSupportedFrameRateRanges() } {
+        if unsafe { range.maxFrameRate() } >= fps {
+            return true;
+        }
+    }
+    false
 }

@@ -96,7 +96,7 @@ pub fn open(cfg: &DriverConfig) -> Result<AndroidDriver, CameraError> {
         session_callbacks,
     )?;
 
-    let rotation_deg: i32 = 90;
+    let rotation_deg: i32 = sizes::sensor_orientation(&mgr, camera_id.as_ptr() as *const c_char);
 
     Ok(AndroidDriver {
         _cfg: cfg,

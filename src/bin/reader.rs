@@ -224,7 +224,7 @@ fn resolve_device(id_opt: Option<&str>) -> Result<Option<DeviceInfo>, CameraErro
         return Ok(Some(d));
     }
 
-    Err(CameraError::invalid_config(format!(
+    Err(CameraError::device_not_found(format!(
         "unknown device id '{want}'; run with --list-devices"
     )))
 }

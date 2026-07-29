@@ -49,7 +49,7 @@ impl FfmpegDriver {
     pub fn open(cfg: &DriverConfig) -> Result<Self, CameraError> {
         cfg.validate()?;
 
-        let cap = cfg.buffer_raw.max(1).min(8);
+        let cap = cfg.settings.buffer_raw.max(1).min(8);
         let (raw_tx, raw_rx) = ch::bounded::<RawFrameRef>(cap);
 
         Ok(Self {
@@ -86,8 +86,8 @@ impl FfmpegDriver {
 
         #[cfg(not(target_os = "macos"))]
         let input_fps: f64 = {
-            let fps = if self.cfg.fps.is_finite() && self.cfg.fps > 0.1 {
-                self.cfg.fps
+            let fps = if self.cfg.settings.fps.is_finite() && self.cfg.settings.fps > 0.1 {
+                self.cfg.settings.fps
             } else {
                 30.0
             };
@@ -103,7 +103,7 @@ impl FfmpegDriver {
             "-loglevel".into(),
             "error".into(),
             "-video_size".into(),
-            format!("{}x{}", self.cfg.width, self.cfg.height),
+            format!("{}x{}", self.cfg.settings.width, self.cfg.settings.height),
             "-framerate".into(),
             format!("{input_fps}"),
         ];
@@ -124,12 +124,13 @@ impl FfmpegDriver {
             "pipe:1".into(),
         ]);
 
-        let stderr =
-            if self.cfg.diagnostics || std::env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some() {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            };
+        let stderr = if self.cfg.settings.diagnostics
+            || std::env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some()
+        {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
 
         Command::new("ffmpeg")
             .args(&ffargs)
@@ -187,8 +188,8 @@ impl CameraDriver for FfmpegDriver {
             .take()
             .ok_or_else(|| CameraError::other("ffmpeg stdout not piped"))?;
 
-        let width = self.cfg.width;
-        let height = self.cfg.height;
+        let width = self.cfg.settings.width;
+        let height = self.cfg.settings.height;
 
         let row_stride = width.saturating_mul(3);
         let frame_size = (row_stride as usize).saturating_mul(height as usize);

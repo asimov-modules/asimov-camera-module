@@ -196,38 +196,14 @@ fn build_driver_config(cfg: &CameraConfig) -> Result<drivers::DriverConfig, Came
         .clone()
         .ok_or_else(|| CameraError::invalid_config("device must be resolved before driver open"))?;
 
-    #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
-    {
-        let dc = drivers::DriverConfig {
-            device,
-            width: cfg.width,
-            height: cfg.height,
-            fps: cfg.fps,
-            buffer_raw: cfg.buffer_raw,
-            diagnostics: cfg.diagnostics,
-            android_preview: cfg.android_preview,
-        }
-        .normalized();
-
-        dc.validate()?;
-        return Ok(dc);
+    let dc = drivers::DriverConfig {
+        device,
+        settings: cfg.settings.clone(),
     }
+    .normalized();
 
-    #[cfg(not(all(feature = "mobile-preview", feature = "android", target_os = "android")))]
-    {
-        let dc = drivers::DriverConfig {
-            device,
-            width: cfg.width,
-            height: cfg.height,
-            fps: cfg.fps,
-            buffer_raw: cfg.buffer_raw,
-            diagnostics: cfg.diagnostics,
-        }
-        .normalized();
-
-        dc.validate()?;
-        Ok(dc)
-    }
+    dc.validate()?;
+    Ok(dc)
 }
 
 #[cfg(all(feature = "mobile-preview", feature = "avf", target_os = "ios"))]

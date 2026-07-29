@@ -5,9 +5,11 @@ use crate::api::AndroidPreviewTarget;
 
 use crate::{CameraError, DeviceInfo};
 
+/// Capture parameters shared by the public `CameraConfig` (device optional,
+/// resolved later) and the internal `DriverConfig` (device mandatory) — kept
+/// as one struct so the two don't drift out of sync with each other.
 #[derive(Clone, Debug)]
-pub struct CameraConfig {
-    pub device: Option<DeviceInfo>,
+pub struct CaptureSettings {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
@@ -18,11 +20,7 @@ pub struct CameraConfig {
     pub android_preview: AndroidPreviewTarget,
 }
 
-impl CameraConfig {
-    pub fn builder() -> CameraConfigBuilder {
-        CameraConfigBuilder::new()
-    }
-
+impl CaptureSettings {
     pub fn normalized(mut self) -> Self {
         self.width = self.width.max(1);
         self.height = self.height.max(1);
@@ -49,7 +47,37 @@ impl CameraConfig {
             return Err(CameraError::invalid_config("buffer_raw must be >= 1"));
         }
 
+        #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
+        {
+            if self.android_preview.as_ptr().is_null() {
+                return Err(CameraError::invalid_config(
+                    "android_preview must be a non-null native window pointer",
+                ));
+            }
+        }
+
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CameraConfig {
+    pub device: Option<DeviceInfo>,
+    pub settings: CaptureSettings,
+}
+
+impl CameraConfig {
+    pub fn builder() -> CameraConfigBuilder {
+        CameraConfigBuilder::new()
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.settings = self.settings.normalized();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), CameraError> {
+        self.settings.validate()
     }
 }
 
@@ -119,42 +147,30 @@ impl CameraConfigBuilder {
 
     pub fn build(self) -> Result<CameraConfig, CameraError> {
         #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
-        {
-            let android_preview = self.android_preview.ok_or_else(|| {
-                CameraError::invalid_config(
-                    "android_preview is required when building with mobile-preview on Android",
-                )
-            })?;
+        let android_preview = self.android_preview.ok_or_else(|| {
+            CameraError::invalid_config(
+                "android_preview is required when building with mobile-preview on Android",
+            )
+        })?;
 
-            let cfg = CameraConfig {
-                device: self.device,
-                width: self.width,
-                height: self.height,
-                fps: self.fps,
-                buffer_raw: self.buffer_raw,
-                diagnostics: self.diagnostics,
-                android_preview,
-            };
+        let settings = CaptureSettings {
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            buffer_raw: self.buffer_raw,
+            diagnostics: self.diagnostics,
 
-            let cfg = cfg.normalized();
-            cfg.validate()?;
-            return Ok(cfg);
+            #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
+            android_preview,
+        };
+
+        let cfg = CameraConfig {
+            device: self.device,
+            settings,
         }
+        .normalized();
 
-        #[cfg(not(all(feature = "mobile-preview", feature = "android", target_os = "android")))]
-        {
-            let cfg = CameraConfig {
-                device: self.device,
-                width: self.width,
-                height: self.height,
-                fps: self.fps,
-                buffer_raw: self.buffer_raw,
-                diagnostics: self.diagnostics,
-            };
-
-            let cfg = cfg.normalized();
-            cfg.validate()?;
-            Ok(cfg)
-        }
+        cfg.validate()?;
+        Ok(cfg)
     }
 }

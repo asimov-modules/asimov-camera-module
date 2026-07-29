@@ -9,6 +9,8 @@ pub enum CameraErrorKind {
     NoDriver,
     NotApplicable,
     NoCamera,
+    DeviceNotFound,
+    DeviceBusy,
     NotConfigured,
     PermissionDenied,
     Unsupported,
@@ -28,6 +30,20 @@ pub enum CameraError {
 
     #[error("no camera device available")]
     NoCamera,
+
+    /// A specific requested device (by id or name) does not exist among the
+    /// currently enumerated devices — distinct from `NoCamera` (no camera
+    /// hardware at all). Typically means the id is stale (device unplugged
+    /// since it was listed) or was mistyped by the caller.
+    #[error("requested camera device not found: {0}")]
+    DeviceNotFound(String),
+
+    /// The camera exists but is already held by another app/process (or the
+    /// platform's concurrent-camera-session limit was hit). Not a bug in
+    /// this module — the caller should retry later or tell the user to
+    /// close whatever else is using the camera.
+    #[error("camera device is busy: {0}")]
+    DeviceBusy(String),
 
     #[error("camera not configured")]
     NotConfigured,
@@ -66,6 +82,8 @@ impl CameraError {
             Self::NoDriver => CameraErrorKind::NoDriver,
             Self::NotApplicable => CameraErrorKind::NotApplicable,
             Self::NoCamera => CameraErrorKind::NoCamera,
+            Self::DeviceNotFound(_) => CameraErrorKind::DeviceNotFound,
+            Self::DeviceBusy(_) => CameraErrorKind::DeviceBusy,
             Self::NotConfigured => CameraErrorKind::NotConfigured,
             Self::PermissionDenied => CameraErrorKind::PermissionDenied,
             Self::Unsupported(_) => CameraErrorKind::Unsupported,
@@ -100,6 +118,16 @@ impl CameraError {
     }
 
     #[inline]
+    pub fn device_not_found(msg: impl Into<String>) -> Self {
+        Self::DeviceNotFound(msg.into())
+    }
+
+    #[inline]
+    pub fn device_busy(msg: impl Into<String>) -> Self {
+        Self::DeviceBusy(msg.into())
+    }
+
+    #[inline]
     pub const fn is_not_applicable(&self) -> bool {
         matches!(self, Self::NotApplicable)
     }
@@ -113,6 +141,7 @@ impl CameraError {
                 | Self::NoCamera
                 | Self::Closed
                 | Self::PermissionDenied
+                | Self::DeviceBusy(_)
         )
     }
 }

@@ -101,7 +101,7 @@ impl AvfDriver {
         let cfg = cfg.clone();
         cfg.validate()?;
 
-        let cap = cfg.buffer_raw.max(1).min(32);
+        let cap = cfg.settings.buffer_raw.max(1).min(32);
         let (raw_tx, raw_rx) = ch::bounded::<RawFrameRef>(cap);
 
         let mtm = MainThreadMarker::new()
@@ -145,12 +145,18 @@ impl AvfDriver {
 
                 let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
                     .map_err(|err| {
-                    // AVFoundationErrorDomain / AVErrorApplicationIsNotAuthorizedToUseDevice.
+                    // AVFoundationErrorDomain codes.
                     const AV_ERROR_NOT_AUTHORIZED: isize = -11852;
-                    if err.code() == AV_ERROR_NOT_AUTHORIZED {
-                        CameraError::PermissionDenied
-                    } else {
-                        CameraError::other("AVCaptureDeviceInput creation failed")
+                    const AV_ERROR_DEVICE_ALREADY_USED_BY_ANOTHER_SESSION: isize = -11813;
+
+                    match err.code() {
+                        AV_ERROR_NOT_AUTHORIZED => CameraError::PermissionDenied,
+                        AV_ERROR_DEVICE_ALREADY_USED_BY_ANOTHER_SESSION => {
+                            CameraError::device_busy(
+                                "AVCaptureDevice is already in use by another session",
+                            )
+                        },
+                        _ => CameraError::other("AVCaptureDeviceInput creation failed"),
                     }
                 })?;
 
@@ -235,14 +241,16 @@ impl AvfDriver {
             }
         }
 
-        Err(CameraError::NoCamera)
+        Err(CameraError::device_not_found(format!(
+            "no AVCaptureDevice matching id='{wanted_id}' name='{wanted_name}'"
+        )))
     }
 
     unsafe fn apply_configuration_to_device(
         device: &AVCaptureDevice,
         cfg: &DriverConfig,
     ) -> Result<(), CameraError> {
-        if cfg.width == 0 || cfg.height == 0 {
+        if cfg.settings.width == 0 || cfg.settings.height == 0 {
             return Ok(());
         }
 
@@ -264,7 +272,7 @@ impl AvfDriver {
                     continue;
                 };
                 all_dims.push((w, h));
-                if format_supports_fps(&format, cfg.fps) {
+                if format_supports_fps(&format, cfg.settings.fps) {
                     fps_capable.push((w, h));
                 }
             }
@@ -276,7 +284,7 @@ impl AvfDriver {
             };
 
             let Some(best_dims) = crate::drivers::resolution::pick_nearest_resolution(
-                (cfg.width, cfg.height),
+                (cfg.settings.width, cfg.settings.height),
                 candidates,
             ) else {
                 return Ok(());
@@ -289,7 +297,7 @@ impl AvfDriver {
                 if format_dims(&format) != Some(best_dims) {
                     continue;
                 }
-                if format_supports_fps(&format, cfg.fps) {
+                if format_supports_fps(&format, cfg.settings.fps) {
                     chosen = Some(format);
                     break;
                 }
@@ -301,8 +309,8 @@ impl AvfDriver {
             if let Some(fmt) = chosen {
                 unsafe { device.setActiveFormat(&fmt) };
 
-                if cfg.fps.is_finite() && cfg.fps > 0.0 {
-                    let fps_i32 = cfg.fps.round().max(1.0).min(i32::MAX as f64) as i32;
+                if cfg.settings.fps.is_finite() && cfg.settings.fps > 0.0 {
+                    let fps_i32 = cfg.settings.fps.round().max(1.0).min(i32::MAX as f64) as i32;
                     let duration = unsafe { CMTime::new(1, fps_i32) };
                     unsafe { device.setActiveVideoMinFrameDuration(duration) };
                     unsafe { device.setActiveVideoMaxFrameDuration(duration) };

@@ -28,11 +28,14 @@ pub fn open(cfg: &DriverConfig) -> Result<AndroidDriver, CameraError> {
         return Err(CameraError::invalid_config("Android camera id is empty"));
     }
 
-    let cap = cfg.buffer_raw.max(1).min(8);
+    let cap = cfg.settings.buffer_raw.max(1).min(8);
     let (raw_tx, raw_rx) = ch::bounded::<RawFrameRef>(cap);
 
-    let preview_ptr: *mut ndk::ANativeWindow =
-        cfg.android_preview.as_ptr().cast::<ndk::ANativeWindow>();
+    let preview_ptr: *mut ndk::ANativeWindow = cfg
+        .settings
+        .android_preview
+        .as_ptr()
+        .cast::<ndk::ANativeWindow>();
 
     if preview_ptr.is_null() {
         return Err(CameraError::invalid_config(
@@ -53,8 +56,16 @@ pub fn open(cfg: &DriverConfig) -> Result<AndroidDriver, CameraError> {
 
     const AIMAGE_FORMAT_YUV_420_888: i32 = 35;
 
-    let desired_w: i32 = if pw > 0 { pw } else { cfg.width as i32 };
-    let desired_h: i32 = if ph > 0 { ph } else { cfg.height as i32 };
+    let desired_w: i32 = if pw > 0 {
+        pw
+    } else {
+        cfg.settings.width as i32
+    };
+    let desired_h: i32 = if ph > 0 {
+        ph
+    } else {
+        cfg.settings.height as i32
+    };
 
     let supported = sizes::list_supported_output_sizes(
         &mgr,
@@ -78,12 +89,14 @@ pub fn open(cfg: &DriverConfig) -> Result<AndroidDriver, CameraError> {
         .map_err(|st| {
             if st.is_permission_denied() {
                 CameraError::PermissionDenied
+            } else if st.is_camera_in_use() || st.is_max_cameras_in_use() {
+                CameraError::device_busy(format!("android camera '{id}' is already in use"))
             } else {
                 CameraError::driver("android: ACameraManager_openCamera", st)
             }
         })?;
 
-    let max_images: i32 = (cfg.buffer_raw.max(2).min(4)) as i32;
+    let max_images: i32 = (cfg.settings.buffer_raw.max(2).min(4)) as i32;
 
     let image_stream = ImageStream::new(
         (best_w as u32, best_h as u32),

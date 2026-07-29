@@ -1,0 +1,8 @@
+# See: https://doc.rust-lang.org/cargo/reference/config.html
+# See: https://docs.shipyard.rs/configuration/git-fetch-with-cli.html
+
+[net]
+git-fetch-with-cli = true
+
+[target.aarch64-linux-android]
+runner = "cargo ndk-runner"

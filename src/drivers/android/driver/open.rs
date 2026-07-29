@@ -75,7 +75,13 @@ pub fn open(cfg: &DriverConfig) -> Result<AndroidDriver, CameraError> {
 
     let dev = mgr
         .open_camera(camera_id.as_ptr() as *const c_char, device_callbacks)
-        .map_err(|st| CameraError::driver("android: ACameraManager_openCamera", st))?;
+        .map_err(|st| {
+            if st.is_permission_denied() {
+                CameraError::PermissionDenied
+            } else {
+                CameraError::driver("android: ACameraManager_openCamera", st)
+            }
+        })?;
 
     let max_images: i32 = (cfg.buffer_raw.max(2).min(4)) as i32;
 

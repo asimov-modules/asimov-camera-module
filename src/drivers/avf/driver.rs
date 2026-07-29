@@ -143,9 +143,16 @@ impl AvfDriver {
                     let _ = Self::apply_configuration_to_device(&device, cfg);
                 });
 
-                let input =
-                    unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
-                        .map_err(|_| CameraError::other("AVCaptureDeviceInput creation failed"))?;
+                let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
+                    .map_err(|err| {
+                    // AVFoundationErrorDomain / AVErrorApplicationIsNotAuthorizedToUseDevice.
+                    const AV_ERROR_NOT_AUTHORIZED: isize = -11852;
+                    if err.code() == AV_ERROR_NOT_AUTHORIZED {
+                        CameraError::PermissionDenied
+                    } else {
+                        CameraError::other("AVCaptureDeviceInput creation failed")
+                    }
+                })?;
 
                 if unsafe { !session.canAddInput(&input) } {
                     return Err(CameraError::other("AVCaptureSession cannot add input"));

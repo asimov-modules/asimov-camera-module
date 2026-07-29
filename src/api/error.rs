@@ -10,6 +10,7 @@ pub enum CameraErrorKind {
     NotApplicable,
     NoCamera,
     NotConfigured,
+    PermissionDenied,
     Unsupported,
     InvalidConfig,
     Closed,
@@ -30,6 +31,13 @@ pub enum CameraError {
 
     #[error("camera not configured")]
     NotConfigured,
+
+    /// The OS denied (or has not yet granted) camera access for this
+    /// process. On iOS/macOS/Android this is a normal, expected outcome the
+    /// first time an app requests the camera — callers should surface a
+    /// permission prompt/settings link, not treat it as an internal error.
+    #[error("camera permission denied")]
+    PermissionDenied,
 
     #[error("unsupported: {0}")]
     Unsupported(String),
@@ -59,6 +67,7 @@ impl CameraError {
             Self::NotApplicable => CameraErrorKind::NotApplicable,
             Self::NoCamera => CameraErrorKind::NoCamera,
             Self::NotConfigured => CameraErrorKind::NotConfigured,
+            Self::PermissionDenied => CameraErrorKind::PermissionDenied,
             Self::Unsupported(_) => CameraErrorKind::Unsupported,
             Self::InvalidConfig(_) => CameraErrorKind::InvalidConfig,
             Self::Closed => CameraErrorKind::Closed,
@@ -99,7 +108,11 @@ impl CameraError {
     pub const fn is_expected(&self) -> bool {
         matches!(
             self,
-            Self::NotApplicable | Self::NoDriver | Self::NoCamera | Self::Closed
+            Self::NotApplicable
+                | Self::NoDriver
+                | Self::NoCamera
+                | Self::Closed
+                | Self::PermissionDenied
         )
     }
 }

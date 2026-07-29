@@ -3,9 +3,7 @@
 #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
 use crate::api::AndroidPreviewTarget;
 
-use crate::{CameraError, DeviceInfo, FrameRef};
-
-use crossbeam_channel as ch;
+use crate::{CameraError, DeviceInfo};
 
 #[derive(Clone, Debug)]
 pub struct CameraConfig {
@@ -14,10 +12,7 @@ pub struct CameraConfig {
     pub height: u32,
     pub fps: f64,
     pub buffer_raw: usize,
-    pub buffer_frames: usize,
-    pub throttle_fps: Option<f64>,
     pub diagnostics: bool,
-    pub frame_tx: Option<ch::Sender<FrameRef>>,
 
     #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
     pub android_preview: AndroidPreviewTarget,
@@ -39,9 +34,6 @@ impl CameraConfig {
         };
 
         self.buffer_raw = self.buffer_raw.max(1);
-        self.buffer_frames = self.buffer_frames.max(1);
-
-        self.throttle_fps = self.throttle_fps.filter(|x| x.is_finite() && *x > 0.0);
 
         self
     }
@@ -56,9 +48,6 @@ impl CameraConfig {
         if self.buffer_raw == 0 {
             return Err(CameraError::invalid_config("buffer_raw must be >= 1"));
         }
-        if self.buffer_frames == 0 {
-            return Err(CameraError::invalid_config("buffer_frames must be >= 1"));
-        }
 
         Ok(())
     }
@@ -71,10 +60,7 @@ pub struct CameraConfigBuilder {
     height: u32,
     fps: f64,
     buffer_raw: usize,
-    buffer_frames: usize,
-    throttle_fps: Option<f64>,
     diagnostics: bool,
-    frame_tx: Option<ch::Sender<FrameRef>>,
 
     #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
     android_preview: Option<AndroidPreviewTarget>,
@@ -88,10 +74,7 @@ impl CameraConfigBuilder {
             height: 720,
             fps: 30.0,
             buffer_raw: 2,
-            buffer_frames: 1,
-            throttle_fps: None,
             diagnostics: false,
-            frame_tx: None,
 
             #[cfg(all(feature = "mobile-preview", feature = "android", target_os = "android"))]
             android_preview: None,
@@ -123,23 +106,8 @@ impl CameraConfigBuilder {
         self
     }
 
-    pub fn buffer_frames(mut self, n: usize) -> Self {
-        self.buffer_frames = n;
-        self
-    }
-
-    pub fn throttle_fps(mut self, fps: Option<f64>) -> Self {
-        self.throttle_fps = fps;
-        self
-    }
-
     pub fn diagnostics(mut self, enabled: bool) -> Self {
         self.diagnostics = enabled;
-        self
-    }
-
-    pub fn frame_tx(mut self, tx: ch::Sender<FrameRef>) -> Self {
-        self.frame_tx = Some(tx);
         self
     }
 
@@ -164,10 +132,7 @@ impl CameraConfigBuilder {
                 height: self.height,
                 fps: self.fps,
                 buffer_raw: self.buffer_raw,
-                buffer_frames: self.buffer_frames,
-                throttle_fps: self.throttle_fps,
                 diagnostics: self.diagnostics,
-                frame_tx: self.frame_tx,
                 android_preview,
             };
 
@@ -184,10 +149,7 @@ impl CameraConfigBuilder {
                 height: self.height,
                 fps: self.fps,
                 buffer_raw: self.buffer_raw,
-                buffer_frames: self.buffer_frames,
-                throttle_fps: self.throttle_fps,
                 diagnostics: self.diagnostics,
-                frame_tx: self.frame_tx,
             };
 
             let cfg = cfg.normalized();

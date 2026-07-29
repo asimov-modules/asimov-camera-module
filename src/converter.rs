@@ -45,8 +45,8 @@ pub fn convert_to_packed_rgb8(raw_ref: RawFrameRef) -> Option<RawFrameRef> {
             Some(Arc::new(out))
         },
 
-        RawFormat::AndroidYuv420888 => {
-            let rgb = yuv420888_to_rgb8(raw_ref.clone())?;
+        RawFormat::Yuv420Triplanar => {
+            let rgb = yuv420_triplanar_to_rgb8(raw_ref.clone())?;
             let out = RawFrame::new_rgb8(
                 raw.width,
                 raw.height,
@@ -78,7 +78,7 @@ pub fn convert_to_packed_bgra8(raw_ref: RawFrameRef) -> Option<RawFrameRef> {
             Some(Arc::new(out))
         },
 
-        RawFormat::AndroidYuv420888 => {
+        RawFormat::Yuv420Triplanar => {
             let rgb_ref = convert_to_packed_rgb8(raw_ref)?;
             let rgb = rgb_ref.as_ref();
             let (src, row_stride, pixel_stride) = get_packed_plane(rgb)?;
@@ -222,7 +222,7 @@ fn rgb_to_bgra(src: &[u8], w: u32, h: u32, row_stride: u32, pixel_stride: u32) -
     Some(out)
 }
 
-fn yuv420888_to_rgb8(raw_ref: RawFrameRef) -> Option<Vec<u8>> {
+fn yuv420_triplanar_to_rgb8(raw_ref: RawFrameRef) -> Option<Vec<u8>> {
     let raw = raw_ref.as_ref();
 
     let w = raw.width as usize;

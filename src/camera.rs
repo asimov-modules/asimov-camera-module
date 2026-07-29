@@ -1,12 +1,11 @@
 // This is free and unencumbered software released into the public domain.
 
 use crate::{
-    CameraBackend, CameraConfig, CameraError, Frame, FrameRef, PixelFormat, RawFormat, RawFrameRef,
+    CameraBackend, CameraConfig, CameraError, FrameRef, PixelFormat, RawFrameRef, SubscribeOptions,
     default_device, drivers,
 };
 
-use crate::converter;
-use crate::runtime::sampler::FpsSampler;
+use crate::dispatch::FrameDistributor;
 
 use crossbeam_channel as ch;
 use std::sync::{
@@ -16,7 +15,7 @@ use std::sync::{
 
 pub struct Camera {
     driver: Box<dyn drivers::CameraDriver>,
-    frame_rx: ch::Receiver<FrameRef>,
+    distributor: Arc<FrameDistributor>,
     stop_tx: ch::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
     closed: Arc<AtomicBool>,
@@ -49,43 +48,34 @@ impl Camera {
         self.driver.close()
     }
 
-    pub fn read_frames(&mut self) -> Result<ch::Receiver<FrameRef>, CameraError> {
+    /// Subscribe to frames converted to `format`. Can be called any number of
+    /// times, before or after `start()`, with the same or different formats;
+    /// each call gets its own independent channel.
+    pub fn subscribe(
+        &self,
+        format: PixelFormat,
+        opts: SubscribeOptions,
+    ) -> Result<ch::Receiver<FrameRef>, CameraError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(CameraError::Closed);
         }
-        Ok(self.frame_rx.clone())
+        Ok(self.distributor.subscribe_converted(format, opts))
+    }
+
+    /// Subscribe to raw, unconverted frames exactly as the driver produced
+    /// them (see `RawFormat` for what that means per platform).
+    pub fn subscribe_raw(
+        &self,
+        opts: SubscribeOptions,
+    ) -> Result<ch::Receiver<RawFrameRef>, CameraError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CameraError::Closed);
+        }
+        Ok(self.distributor.subscribe_raw(opts))
     }
 
     pub fn driver_preview_info(&self) -> Option<(u32, u32, i32)> {
         self.driver.preview_info()
-    }
-
-    fn raw_to_frame(raw: RawFrameRef) -> Option<FrameRef> {
-        let r = raw.as_ref();
-        if r.planes.is_empty() {
-            return None;
-        }
-
-        match r.format {
-            RawFormat::PackedRgb8 => {
-                let p0 = &r.planes[0];
-
-                if p0.pixel_stride != 3 {
-                    return None;
-                }
-
-                Some(Arc::new(Frame::new(
-                    r.width,
-                    r.height,
-                    p0.row_stride.max(r.width.saturating_mul(3)),
-                    PixelFormat::Rgb8,
-                    p0.data.clone(),
-                    r.timestamp_ns,
-                )))
-            },
-
-            _ => converter::convert_raw_to_frame(raw, PixelFormat::Rgb8),
-        }
     }
 }
 
@@ -112,15 +102,10 @@ pub fn open_camera(mut cfg: CameraConfig) -> Result<Camera, CameraError> {
 
     let raw_rx = driver.read_frames()?;
 
-    let cap = cfg.buffer_frames.max(1);
-    let (frame_tx, frame_rx) = ch::bounded::<FrameRef>(cap);
-    let frame_rx_thread = frame_rx.clone();
-
     let (stop_tx, stop_rx) = ch::bounded::<()>(1);
 
-    let throttle_fps = cfg.throttle_fps;
-    let diagnostics = cfg.diagnostics;
-    let extra_frame_tx = cfg.frame_tx.clone();
+    let distributor = Arc::new(FrameDistributor::new());
+    let distributor_thread = Arc::clone(&distributor);
 
     let closed = Arc::new(AtomicBool::new(false));
     let closed_thread = Arc::clone(&closed);
@@ -128,8 +113,6 @@ pub fn open_camera(mut cfg: CameraConfig) -> Result<Camera, CameraError> {
     let worker = std::thread::Builder::new()
         .name("asimov-camera-dispatch".to_string())
         .spawn(move || {
-            let mut sampler = throttle_fps.map(FpsSampler::new);
-
             loop {
                 ch::select! {
                     recv(stop_rx) -> _ => break,
@@ -148,26 +131,7 @@ pub fn open_camera(mut cfg: CameraConfig) -> Result<Camera, CameraError> {
                             continue;
                         }
 
-                        if let Some(s) = sampler.as_mut() {
-                            if !s.should_emit() {
-                                continue;
-                            }
-                        }
-
-                        let Some(frame) = Camera::raw_to_frame(raw) else {
-                            continue;
-                        };
-
-                        if frame_tx.try_send(frame.clone()).is_err() {
-                            let _ = frame_rx_thread.try_recv();
-                            let _ = frame_tx.try_send(frame.clone());
-                        }
-
-                        if let Some(tx) = extra_frame_tx.as_ref() {
-                            let _ = tx.try_send(frame);
-                        }
-
-                        let _ = diagnostics;
+                        distributor_thread.dispatch(raw);
                     }
                 }
             }
@@ -176,7 +140,7 @@ pub fn open_camera(mut cfg: CameraConfig) -> Result<Camera, CameraError> {
 
     Ok(Camera {
         driver,
-        frame_rx,
+        distributor,
         stop_tx,
         worker: Some(worker),
         closed,

@@ -15,6 +15,9 @@ pub use error::*;
 mod frame;
 pub use frame::*;
 
+mod subscribe;
+pub use subscribe::*;
+
 #[cfg(all(
     feature = "mobile-preview",
     any(target_os = "ios", target_os = "android")

@@ -4,8 +4,8 @@
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
 use asimov_camera_module::{
-    CameraConfig, CameraError, DeviceInfo, DeviceKind, FrameRef, PixelFormat, default_device,
-    list_video_devices, open_camera,
+    CameraConfig, CameraError, DeviceInfo, DeviceKind, FrameRef, PixelFormat, SubscribeOptions,
+    default_device, list_video_devices, open_camera,
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -20,7 +20,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Parser)]
@@ -98,7 +98,6 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
 
     let (width, height) = opts.size;
     let fps = opts.frequency.max(0.1);
-    let min_interval = Duration::from_secs_f64(1.0 / fps);
 
     let device = resolve_device(opts.device.as_deref())?;
 
@@ -137,9 +136,11 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
     }
 
     cam.start()?;
-    let rx = cam.read_frames()?;
+    let rx = cam.subscribe(
+        PixelFormat::Rgb8,
+        SubscribeOptions::default().with_throttle_fps(fps),
+    )?;
 
-    let last_emit = Arc::new(Mutex::new(Instant::now()));
     let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
     let hasher =
         (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
@@ -153,15 +154,6 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
 
         if quit.load(Ordering::SeqCst) {
             break;
-        }
-
-        {
-            let mut guard = last_emit.lock().unwrap_or_else(|p| p.into_inner());
-            let now = Instant::now();
-            if now.duration_since(*guard) < min_interval {
-                continue;
-            }
-            *guard = now;
         }
 
         if let Some(ref hasher) = hasher {

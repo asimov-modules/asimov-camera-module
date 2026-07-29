@@ -23,7 +23,8 @@ impl PixelFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RawFormat {
-    AndroidYuv420888,
+    /// Three separate planes (Y, U, V), each with its own row/pixel stride.
+    Yuv420Triplanar,
     PackedRgb8,
     PackedBgra8,
 }

@@ -75,7 +75,7 @@ impl ImageStream {
                 planes.push(RawPlane::new(Bytes::from(data), row_stride, pixel_stride));
             }
 
-            let raw = RawFrame::new(width, height, RawFormat::AndroidYuv420888, planes, ts_ns);
+            let raw = RawFrame::new(width, height, RawFormat::Yuv420Triplanar, planes, ts_ns);
             let frame_ref: RawFrameRef = Arc::new(raw);
 
             let _ = st.raw_tx.try_send(frame_ref);

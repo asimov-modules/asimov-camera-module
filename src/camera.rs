@@ -1,15 +1,15 @@
 // This is free and unencumbered software released into the public domain.
 
 use crate::{
-    CameraBackend, CameraConfig, CameraError, FrameRef, PixelFormat, RawFrameRef, SubscribeOptions,
-    default_device, drivers,
+    CameraBackend, CameraConfig, CameraError, CameraState, FrameRef, PixelFormat, RawFrameRef,
+    SubscribeOptions, default_device, drivers,
 };
 
 use crate::dispatch::FrameDistributor;
 
 use crossbeam_channel as ch;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -18,6 +18,15 @@ pub struct Camera {
     distributor: Arc<FrameDistributor>,
     stop_tx: ch::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
+
+    /// Authoritative lifecycle state (see `CameraState`). Only touched by
+    /// `start`/`stop`/`close`/`subscribe*`, all cold-path calls, so a mutex
+    /// here is free.
+    state: Mutex<CameraState>,
+
+    /// Cheap hot-path mirror of `state == Closed`, polled once per dispatched
+    /// frame by the worker thread. An atomic load there costs nothing; taking
+    /// `state`'s mutex on every frame would not be free.
     closed: Arc<AtomicBool>,
 }
 
@@ -26,37 +35,70 @@ impl Camera {
         self.driver.backend()
     }
 
+    /// Current lifecycle state.
+    pub fn state(&self) -> CameraState {
+        *self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Begin capturing, or resume after `stop()`. A no-op if already
+    /// `Running`. Fails with `CameraError::Closed` if the camera is closed.
     pub fn start(&mut self) -> Result<(), CameraError> {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            match *st {
+                CameraState::Closed => return Err(CameraError::Closed),
+                CameraState::Running => return Ok(()),
+                CameraState::Idle | CameraState::Stopped => *st = CameraState::Running,
+            }
+        }
         self.driver.start()
     }
 
+    /// Pause capturing without releasing the underlying device/session, so a
+    /// later `start()` resumes cheaply. A no-op unless currently `Running`.
     pub fn stop(&mut self) -> Result<(), CameraError> {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            match *st {
+                CameraState::Running => *st = CameraState::Stopped,
+                _ => return Ok(()),
+            }
+        }
         self.driver.stop()
     }
 
+    /// Release the camera. Terminal — no further calls are valid afterwards.
+    /// Idempotent.
     pub fn close(&mut self) -> Result<(), CameraError> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if *st == CameraState::Closed {
+                return Ok(());
+            }
+            *st = CameraState::Closed;
         }
+        self.closed.store(true, Ordering::Release);
 
         let _ = self.stop_tx.try_send(());
         if let Some(h) = self.worker.take() {
             let _ = h.join();
         }
 
-        let _ = self.stop();
+        let _ = self.driver.stop();
         self.driver.close()
     }
 
-    /// Subscribe to frames converted to `format`. Can be called any number of
-    /// times, before or after `start()`, with the same or different formats;
-    /// each call gets its own independent channel.
+    /// Subscribe to frames converted to `format`. Legal in any state except
+    /// `Closed` — subscribing before `start()` is fine, and lets you avoid
+    /// missing the first frames once capture begins. Can be called any
+    /// number of times, with the same or different formats; each call gets
+    /// its own independent channel.
     pub fn subscribe(
         &self,
         format: PixelFormat,
         opts: SubscribeOptions,
     ) -> Result<ch::Receiver<FrameRef>, CameraError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.state() == CameraState::Closed {
             return Err(CameraError::Closed);
         }
         Ok(self.distributor.subscribe_converted(format, opts))
@@ -68,7 +110,7 @@ impl Camera {
         &self,
         opts: SubscribeOptions,
     ) -> Result<ch::Receiver<RawFrameRef>, CameraError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.state() == CameraState::Closed {
             return Err(CameraError::Closed);
         }
         Ok(self.distributor.subscribe_raw(opts))
@@ -143,6 +185,7 @@ pub fn open_camera(mut cfg: CameraConfig) -> Result<Camera, CameraError> {
         distributor,
         stop_tx,
         worker: Some(worker),
+        state: Mutex::new(CameraState::Idle),
         closed,
     })
 }

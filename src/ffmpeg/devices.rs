@@ -1,12 +1,50 @@
 // This is free and unencumbered software released into the public domain.
 
-use crate::{CameraError, DeviceInfo, DeviceKind};
+use crate::ffmpeg::{CameraError, Result};
 
-pub fn list_video_devices() -> Result<Vec<DeviceInfo>, CameraError> {
-    #[cfg(target_os = "macos")]
-    {
-        return ffmpeg_list_devices_macos_avfoundation();
+/// Mirrors `nativecam::DeviceInfo`'s shape.
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    id: String,
+    name: String,
+    kind: DeviceKind,
+}
+
+impl DeviceInfo {
+    fn new(id: String, name: String, kind: DeviceKind) -> Self {
+        Self { id, name, kind }
     }
+
+    #[inline]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[inline]
+    pub fn kind(&self) -> DeviceKind {
+        self.kind
+    }
+}
+
+/// Mirrors `nativecam::DeviceKind`'s shape. `Front`/`Back` never occur here
+/// (no phone camera concept on Linux/Windows) but exist so shared CLI code
+/// matching on them compiles regardless of which backend is in scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    External,
+    #[allow(dead_code)]
+    Front,
+    #[allow(dead_code)]
+    Back,
+    Unknown,
+}
+
+pub fn list_video_devices() -> Result<Vec<DeviceInfo>> {
     #[cfg(target_os = "windows")]
     {
         return ffmpeg_list_devices_windows_dshow();
@@ -20,8 +58,23 @@ pub fn list_video_devices() -> Result<Vec<DeviceInfo>, CameraError> {
     Ok(Vec::new())
 }
 
+pub fn pick_preferred_device(devices: &[DeviceInfo]) -> Option<DeviceInfo> {
+    if devices.is_empty() {
+        return None;
+    }
+    if let Some(d) = devices.iter().find(|d| d.kind() == DeviceKind::External) {
+        return Some(d.clone());
+    }
+    Some(devices[0].clone())
+}
+
+pub fn default_device() -> Result<Option<DeviceInfo>> {
+    let devices = list_video_devices()?;
+    Ok(pick_preferred_device(&devices))
+}
+
 fn ffmpeg_bin() -> String {
-    std::env::var("OPENPACK_FFMPEG_BIN")
+    std::env::var("ASIMOV_CAMERA_FFMPEG_BIN")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
@@ -32,7 +85,8 @@ fn ffmpeg_bin() -> String {
         .unwrap_or_else(|| "ffmpeg".to_string())
 }
 
-fn run_ffmpeg(args: &[&str]) -> Result<(i32, String, String), CameraError> {
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn run_ffmpeg(args: &[&str]) -> Result<(i32, String, String)> {
     use std::process::Command;
 
     let bin = ffmpeg_bin();
@@ -52,117 +106,8 @@ fn run_ffmpeg(args: &[&str]) -> Result<(i32, String, String), CameraError> {
     Ok((code, stdout, stderr))
 }
 
-fn ffmpeg_list_devices_macos_avfoundation() -> Result<Vec<DeviceInfo>, CameraError> {
-    let (_code, _stdout, stderr) = run_ffmpeg(&[
-        "-hide_banner",
-        "-f",
-        "avfoundation",
-        "-list_devices",
-        "true",
-        "-i",
-        "",
-    ])?;
-
-    let usb_names = macos_usb_product_names();
-
-    let mut in_video = false;
-    let mut out = Vec::new();
-
-    for line in stderr.lines() {
-        if line.contains("AVFoundation video devices:") {
-            in_video = true;
-            continue;
-        }
-        if line.contains("AVFoundation audio devices:") {
-            in_video = false;
-            continue;
-        }
-        if !in_video {
-            continue;
-        }
-
-        if let Some(pos) = line.rfind("] [") {
-            let tail = &line[pos + 3..];
-            if let Some(end) = tail.find(']') {
-                let idx = tail[..end].trim();
-                let name = tail[end + 1..].trim();
-                if idx.is_empty() || name.is_empty() {
-                    continue;
-                }
-
-                let is_usb = usb_names
-                    .iter()
-                    .any(|u| !u.is_empty() && contains_case_insensitive(name, u));
-
-                out.push(DeviceInfo::new(
-                    idx.to_string(),
-                    name.to_string(),
-                    if is_usb {
-                        DeviceKind::External
-                    } else {
-                        DeviceKind::Unknown
-                    },
-                ));
-            }
-        }
-    }
-
-    if out.is_empty() {
-        return Err(CameraError::other(
-            "no video devices were returned by ffmpeg (avfoundation)",
-        ));
-    }
-
-    Ok(out)
-}
-
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
-}
-
-fn macos_usb_product_names() -> Vec<String> {
-    let out = std::process::Command::new("ioreg")
-        .args(["-p", "IOUSB", "-l"])
-        .output();
-
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut names = Vec::new();
-
-    for line in s.lines() {
-        let line = line.trim();
-        if let Some(v) = extract_quoted_value(line, "\"USB Product Name\"") {
-            names.push(v);
-        } else if let Some(v) = extract_quoted_value(line, "\"kUSBProductString\"") {
-            names.push(v);
-        }
-    }
-
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
-    if !line.contains(key) {
-        return None;
-    }
-    let eq = line.find('=')?;
-    let rhs = line[eq + 1..].trim();
-    let first = rhs.find('"')?;
-    let rest = &rhs[first + 1..];
-    let last = rest.find('"')?;
-    Some(rest[..last].to_string())
-}
-
 #[cfg(target_os = "windows")]
-fn ffmpeg_list_devices_windows_dshow() -> Result<Vec<DeviceInfo>, CameraError> {
+fn ffmpeg_list_devices_windows_dshow() -> Result<Vec<DeviceInfo>> {
     let (_code, _stdout, stderr) = run_ffmpeg(&[
         "-hide_banner",
         "-f",
@@ -225,7 +170,7 @@ fn ffmpeg_list_devices_windows_dshow() -> Result<Vec<DeviceInfo>, CameraError> {
 }
 
 #[cfg(target_os = "linux")]
-fn ffmpeg_list_devices_linux_v4l2() -> Result<Vec<DeviceInfo>, CameraError> {
+fn ffmpeg_list_devices_linux_v4l2() -> Result<Vec<DeviceInfo>> {
     use std::fs;
     use std::path::{Path, PathBuf};
 

@@ -3,9 +3,21 @@
 #[cfg(not(feature = "std"))]
 compile_error!("asimov-camera-reader requires the 'std' feature");
 
-use asimov_camera_module::{
-    CameraConfig, CameraError, DeviceInfo, DeviceKind, FrameRef, PixelFormat, SubscribeOptions,
-    default_device, list_video_devices, open_camera,
+// Two independent, unrelated capture backends, selected at compile time.
+// `nativecam` is authoritative — the ffmpeg module mirrors its API shape
+// (same names) so the CLI logic below is written once; it shares no code
+// with `nativecam` and can be deleted without touching this file's logic,
+// just the branch that imports it.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+use nativecam::{
+    Camera, CameraConfig, CameraError, DeviceInfo, DeviceKind, FrameRef, PixelFormat,
+    SubscribeOptions, default_device, list_video_devices,
+};
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use asimov_camera_module::ffmpeg::{
+    Camera, CameraConfig, CameraError, DeviceInfo, DeviceKind, FrameRef, PixelFormat,
+    SubscribeOptions, default_device, list_video_devices,
 };
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
@@ -121,7 +133,7 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
         b.build()?
     };
 
-    let mut cam = open_camera(cfg)?;
+    let mut cam = Camera::open(cfg)?;
 
     if debug || verbose >= 1 {
         let label = opts
@@ -156,26 +168,25 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
             break;
         }
 
-        if let Some(ref hasher) = hasher {
-            if frame.pixel_format == PixelFormat::Rgb8 {
-                if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                    frame.width,
-                    frame.height,
-                    frame.data.to_vec(),
-                ) {
-                    let img_data = image::DynamicImage::ImageRgb8(img_buffer);
-                    let hash = hasher.hash_image(&img_data);
+        if let Some(ref hasher) = hasher
+            && frame.pixel_format == PixelFormat::Rgb8
+            && let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
+                frame.width,
+                frame.height,
+                frame.data.to_vec(),
+            )
+        {
+            let img_data = image::DynamicImage::ImageRgb8(img_buffer);
+            let hash = hasher.hash_image(&img_data);
 
-                    let mut prev = last_hash.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(ref mut prev_hash) = *prev {
-                        if hash.dist(prev_hash) < opts.debounce as u32 {
-                            continue;
-                        }
-                        *prev_hash = hash;
-                    } else {
-                        *prev = Some(hash);
-                    }
+            let mut prev = last_hash.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(ref mut prev_hash) = *prev {
+                if hash.dist(prev_hash) < opts.debounce as u32 {
+                    continue;
                 }
+                *prev_hash = hash;
+            } else {
+                *prev = Some(hash);
             }
         }
 
@@ -200,10 +211,10 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
         };
 
         let mut out = io::stdout().lock();
-        if let Err(err) = writeln!(&mut out, "{json}") {
-            if err.kind() == io::ErrorKind::BrokenPipe {
-                quit.store(true, Ordering::SeqCst);
-            }
+        if let Err(err) = writeln!(&mut out, "{json}")
+            && err.kind() == io::ErrorKind::BrokenPipe
+        {
+            quit.store(true, Ordering::SeqCst);
         }
     }
 
@@ -215,7 +226,7 @@ fn resolve_device(id_opt: Option<&str>) -> Result<Option<DeviceInfo>, CameraErro
     let id = id_opt.map(|s| s.trim()).filter(|s| !s.is_empty());
 
     if id.is_none() {
-        return Ok(default_device()?);
+        return default_device();
     }
 
     let want = id.unwrap();

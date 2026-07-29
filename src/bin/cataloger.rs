@@ -3,7 +3,11 @@
 #[cfg(not(feature = "std"))]
 compile_error!("asimov-camera-cataloger requires the 'std' feature");
 
-use asimov_camera_module::{CameraError, DeviceKind};
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+use nativecam::{CameraError, DeviceKind, list_video_devices};
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use asimov_camera_module::ffmpeg::{CameraError, DeviceKind, list_video_devices};
 use asimov_module::SysexitsError::{self, *};
 use clap::Parser;
 use clientele::StandardOptions;
@@ -62,7 +66,7 @@ fn run_cataloger(options: &Options) -> Result<(), CameraError> {
         eprintln!("INFO: enumerating camera devices");
     }
 
-    let mut devices = asimov_camera_module::list_video_devices()?;
+    let mut devices = list_video_devices()?;
     if devices.is_empty() {
         if options.flags.debug || options.flags.verbose >= 1 {
             eprintln!("WARN: no camera devices found");
@@ -105,6 +109,7 @@ fn kind_label(k: DeviceKind) -> &'static str {
         DeviceKind::Front => "front",
         DeviceKind::Back => "back",
         DeviceKind::Unknown => "unknown",
+        _ => "unknown",
     }
 }
 

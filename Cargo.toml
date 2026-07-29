@@ -15,10 +15,9 @@ license = "Unlicense"
 keywords = ["asimov-module", "asimov", "ai"]
 categories = ["command-line-utilities", "text-processing"] # TODO
 publish = false
-build = "build.rs"
 
 [features]
-default = ["cli", "std", "ffmpeg", "android", "avf"]
+default = ["cli", "std"]
 cli = [
   "asimov-module/cli",
   "std",
@@ -31,19 +30,6 @@ cli = [
 std = ["asimov-module/std", "clap?/std", "clientele?/std"]
 pretty = []
 tracing = ["asimov-module/tracing", "clientele?/tracing"]
-mobile-preview = []
-ffmpeg = []
-android = ["mobile-preview", "dep:ndk-sys"]
-avf = [
-  "mobile-preview",
-  "dep:dispatch2",
-  "dep:objc2",
-  "dep:objc2-av-foundation",
-  "dep:objc2-core-foundation",
-  "dep:objc2-core-media",
-  "dep:objc2-core-video",
-  "dep:objc2-foundation",
-]
 
 [dependencies]
 asimov-module = { version = "25", default-features = false, features = ["std"] }
@@ -60,20 +46,11 @@ serde_json = { version = "1.0.145", optional = true }
 image = { version = "0.25", optional = true }
 image_hasher = { version = "3", features = ["fast_image_resize"], optional = true }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(target_os = "android")'.dependencies]
-ndk-sys = { version = "0.6", optional = true }
-
-[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
-dispatch2 = { version = "0.3", optional = true }
-objc2 = { version = "0.6", optional = true, features = ["exception"] }
-objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"], optional = true }
-objc2-core-foundation = { version = "0.3", optional = true }
-objc2-core-media = { version = "0.3", optional = true }
-objc2-core-video = { version = "0.3", optional = true }
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSObject"], optional = true }
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))'.dependencies]
+# Native capture (Camera2 NDK / AVFoundation) — a separate, standalone crate;
+# see https://github.com/CHANGE-ME/nativecam. Path dependency for now, while
+# it's still developed alongside this module.
+nativecam = { path = "../nativecam" }
 
 [profile.release]
 opt-level = "z"

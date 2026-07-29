@@ -7,62 +7,110 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use crossbeam_channel as ch;
 
-use crate::drivers::{CameraDriver, DriverConfig};
-use crate::{CameraBackend, CameraError, RawFormat, RawFrame, RawFrameRef, RawPlane};
+use crate::ffmpeg::{
+    CameraConfig, CameraError, Frame, FrameRef, PixelFormat, Result, SubscribeOptions,
+};
 
-pub struct FfmpegDriver {
-    cfg: DriverConfig,
+/// Mirrors `nativecam::engine::sampler::FpsSampler`'s shape.
+struct FpsSampler {
+    period: Duration,
+    next_deadline: Instant,
+}
 
-    raw_tx: ch::Sender<RawFrameRef>,
-    raw_rx: ch::Receiver<RawFrameRef>,
+impl FpsSampler {
+    fn new(fps: f64) -> Self {
+        let fps = if fps.is_finite() && fps > 0.0 {
+            fps
+        } else {
+            30.0
+        };
+        let period = Duration::from_secs_f64(1.0 / fps);
+        Self {
+            period,
+            next_deadline: Instant::now() + period,
+        }
+    }
+
+    fn should_emit(&mut self) -> bool {
+        let now = Instant::now();
+        if now < self.next_deadline {
+            return false;
+        }
+        self.next_deadline = if now >= self.next_deadline {
+            now + self.period
+        } else {
+            self.next_deadline + self.period
+        };
+        true
+    }
+}
+
+struct Sink {
+    tx: ch::Sender<FrameRef>,
+    rx_probe: ch::Receiver<FrameRef>,
+    sampler: Option<FpsSampler>,
+}
+
+/// Mirrors `nativecam::Camera`'s shape (the subset the CLI needs): open,
+/// start, stop, subscribe. Always emits `PixelFormat::Rgb8` — that's what's
+/// requested from the `ffmpeg` process itself, no conversion layer needed.
+pub struct Camera {
+    cfg: CameraConfig,
+    sinks: Arc<Mutex<Vec<Sink>>>,
 
     child: Option<Arc<Mutex<Child>>>,
     stop: Arc<AtomicBool>,
-    running: AtomicBool,
-    closed: AtomicBool,
+    running: bool,
+    closed: bool,
 
     reader_join: Option<JoinHandle<()>>,
     monitor_join: Option<JoinHandle<()>>,
 }
 
-pub fn try_open(cfg: &DriverConfig) -> Result<Box<dyn CameraDriver>, CameraError> {
-    Ok(Box::new(FfmpegDriver::open(cfg)?))
-}
-
-impl core::fmt::Debug for FfmpegDriver {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("FfmpegDriver")
-            .field("cfg", &self.cfg)
-            .field("child", &self.child.as_ref().map(|_| "<child>"))
-            .field("running", &self.running.load(Ordering::Relaxed))
-            .field("closed", &self.closed.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
-impl FfmpegDriver {
-    pub fn open(cfg: &DriverConfig) -> Result<Self, CameraError> {
-        cfg.validate()?;
-
-        let cap = cfg.settings.buffer_raw.max(1).min(8);
-        let (raw_tx, raw_rx) = ch::bounded::<RawFrameRef>(cap);
-
+impl Camera {
+    pub fn open(cfg: CameraConfig) -> Result<Self> {
         Ok(Self {
-            cfg: cfg.clone(),
-            raw_tx,
-            raw_rx,
+            cfg,
+            sinks: Arc::new(Mutex::new(Vec::new())),
             child: None,
             stop: Arc::new(AtomicBool::new(false)),
-            running: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
+            running: false,
+            closed: false,
             reader_join: None,
             monitor_join: None,
         })
+    }
+
+    pub fn subscribe(
+        &self,
+        format: PixelFormat,
+        opts: SubscribeOptions,
+    ) -> Result<ch::Receiver<FrameRef>> {
+        if self.closed {
+            return Err(CameraError::Closed);
+        }
+        if format != PixelFormat::Rgb8 {
+            return Err(CameraError::Other(
+                "the ffmpeg backend only ever produces Rgb8".to_string(),
+            ));
+        }
+
+        let (tx, rx) = ch::bounded(opts.capacity.max(1));
+        let sink = Sink {
+            tx,
+            rx_probe: rx.clone(),
+            sampler: opts.throttle_fps.map(FpsSampler::new),
+        };
+        self.sinks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(sink);
+        Ok(rx)
     }
 
     #[inline]
@@ -73,28 +121,27 @@ impl FfmpegDriver {
             .unwrap_or(0)
     }
 
-    fn spawn_ffmpeg(&self) -> Result<Child, CameraError> {
-        let device_id = self.cfg.device.id().trim();
+    fn spawn_ffmpeg(&self) -> Result<Child> {
+        let device_id = self
+            .cfg
+            .device
+            .as_ref()
+            .map(|d| d.id().trim().to_string())
+            .unwrap_or_default();
         if device_id.is_empty() {
             return Err(CameraError::invalid_config("ffmpeg device id is empty"));
         }
 
-        let input_device = get_input_device(device_id);
+        let input_device = get_input_device(&device_id);
 
-        #[cfg(target_os = "macos")]
-        let input_fps: f64 = 30.0;
+        let input_fps = if self.cfg.fps.is_finite() && self.cfg.fps > 0.1 {
+            self.cfg.fps
+        } else {
+            30.0
+        }
+        .min(240.0);
 
-        #[cfg(not(target_os = "macos"))]
-        let input_fps: f64 = {
-            let fps = if self.cfg.settings.fps.is_finite() && self.cfg.settings.fps > 0.1 {
-                self.cfg.settings.fps
-            } else {
-                30.0
-            };
-            fps.min(240.0)
-        };
-
-        let mut ffargs: Vec<String> = vec![
+        let ffargs: Vec<String> = vec![
             "-hide_banner".into(),
             "-nostdin".into(),
             "-nostats".into(),
@@ -103,18 +150,9 @@ impl FfmpegDriver {
             "-loglevel".into(),
             "error".into(),
             "-video_size".into(),
-            format!("{}x{}", self.cfg.settings.width, self.cfg.settings.height),
+            format!("{}x{}", self.cfg.width, self.cfg.height),
             "-framerate".into(),
             format!("{input_fps}"),
-        ];
-
-        #[cfg(target_os = "macos")]
-        {
-            ffargs.push("-pixel_format".into());
-            ffargs.push("0rgb".into());
-        }
-
-        ffargs.extend([
             "-i".into(),
             input_device,
             "-pix_fmt".into(),
@@ -122,15 +160,14 @@ impl FfmpegDriver {
             "-f".into(),
             "rawvideo".into(),
             "pipe:1".into(),
-        ]);
+        ];
 
-        let stderr = if self.cfg.settings.diagnostics
-            || std::env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some()
-        {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        };
+        let stderr =
+            if self.cfg.diagnostics || std::env::var_os("ASIMOV_CAMERA_FFMPEG_STDERR").is_some() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            };
 
         Command::new("ffmpeg")
             .args(&ffargs)
@@ -145,7 +182,7 @@ impl FfmpegDriver {
             return;
         };
         let mut g = child_arc.lock().unwrap_or_else(|p| p.into_inner());
-        terminate_child(&mut *g);
+        terminate_child(&mut g);
     }
 
     fn join_threads(&mut self) {
@@ -156,27 +193,12 @@ impl FfmpegDriver {
             let _ = j.join();
         }
     }
-}
 
-impl Drop for FfmpegDriver {
-    fn drop(&mut self) {
-        let _ = self.close();
-    }
-}
-
-impl CameraDriver for FfmpegDriver {
-    fn backend(&self) -> CameraBackend {
-        CameraBackend::Ffmpeg
-    }
-
-    fn start(&mut self) -> Result<(), CameraError> {
-        if self.closed.load(Ordering::Acquire) {
+    pub fn start(&mut self) -> Result<()> {
+        if self.closed {
             return Err(CameraError::Closed);
         }
-        if self.running.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        if self.child.is_some() {
+        if self.running {
             return Ok(());
         }
 
@@ -188,8 +210,8 @@ impl CameraDriver for FfmpegDriver {
             .take()
             .ok_or_else(|| CameraError::other("ffmpeg stdout not piped"))?;
 
-        let width = self.cfg.settings.width;
-        let height = self.cfg.settings.height;
+        let width = self.cfg.width;
+        let height = self.cfg.height;
 
         let row_stride = width.saturating_mul(3);
         let frame_size = (row_stride as usize).saturating_mul(height as usize);
@@ -198,9 +220,7 @@ impl CameraDriver for FfmpegDriver {
         self.child = Some(Arc::clone(&child_arc));
 
         let stop = Arc::clone(&self.stop);
-        let raw_tx = self.raw_tx.clone();
-
-        let raw_rx_drop = self.raw_rx.clone();
+        let sinks = Arc::clone(&self.sinks);
 
         let reader_join = std::thread::Builder::new()
             .name("asimov-ffmpeg-reader".to_string())
@@ -211,29 +231,29 @@ impl CameraDriver for FfmpegDriver {
                 while !stop.load(Ordering::Acquire) {
                     match reader.read_exact(&mut buf) {
                         Ok(()) => {
-                            let ts = FfmpegDriver::now_ns_best_effort();
+                            let ts = Self::now_ns_best_effort();
 
-                            let plane = RawPlane::new(Bytes::copy_from_slice(&buf), row_stride, 3);
-
-                            let frame_ref: RawFrameRef = Arc::new(RawFrame {
+                            let frame_ref: FrameRef = Arc::new(Frame {
                                 width,
                                 height,
-                                format: RawFormat::PackedRgb8,
-                                planes: vec![plane],
+                                stride: row_stride,
+                                pixel_format: PixelFormat::Rgb8,
+                                data: Bytes::copy_from_slice(&buf),
                                 timestamp_ns: Some(ts),
                             });
 
-                            if raw_tx.try_send(Arc::clone(&frame_ref)).is_err() {
-                                let _ = raw_rx_drop.try_recv();
-                                let _ = raw_tx.try_send(frame_ref);
-                            }
+                            let mut sinks = sinks.lock().unwrap_or_else(|p| p.into_inner());
+                            sinks.retain_mut(|sink| {
+                                if let Some(s) = sink.sampler.as_mut() {
+                                    if !s.should_emit() {
+                                        return true;
+                                    }
+                                }
+                                send_latest(&sink.tx, &sink.rx_probe, frame_ref.clone())
+                            });
                         },
-                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                            break;
-                        },
-                        Err(_) => {
-                            break;
-                        },
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(_) => break,
                     }
                 }
             })
@@ -262,39 +282,47 @@ impl CameraDriver for FfmpegDriver {
 
         self.reader_join = Some(reader_join);
         self.monitor_join = Some(monitor_join);
+        self.running = true;
 
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), CameraError> {
+    pub fn stop(&mut self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
-
         self.stop_child();
-
         self.join_threads();
-
-        self.running.store(false, Ordering::Release);
+        self.running = false;
         Ok(())
     }
 
-    fn close(&mut self) -> Result<(), CameraError> {
-        if self.closed.swap(true, Ordering::AcqRel) {
+    pub fn close(&mut self) -> Result<()> {
+        if self.closed {
             return Ok(());
         }
-        let _ = self.stop();
-        Ok(())
-    }
-
-    fn read_frames(&mut self) -> Result<ch::Receiver<RawFrameRef>, CameraError> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(CameraError::Closed);
-        }
-        Ok(self.raw_rx.clone())
+        self.closed = true;
+        self.stop()
     }
 }
 
+impl Drop for Camera {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+/// Send the latest frame, evicting a stale queued one on backpressure instead
+/// of blocking or dropping the newest frame — mirrors
+/// `nativecam::engine::dispatch`'s same pattern.
+fn send_latest<T: Clone>(tx: &ch::Sender<T>, rx_probe: &ch::Receiver<T>, item: T) -> bool {
+    if tx.try_send(item.clone()).is_ok() {
+        return true;
+    }
+    let _ = rx_probe.try_recv();
+    !matches!(tx.try_send(item), Err(ch::TrySendError::Disconnected(_)))
+}
+
 fn terminate_child(child: &mut Child) {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     while start.elapsed() < Duration::from_millis(200) {
         if let Ok(Some(_)) = child.try_wait() {
             return;
@@ -306,11 +334,6 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[cfg(target_os = "macos")]
-fn ffmpeg_format() -> &'static str {
-    "avfoundation"
-}
-
 #[cfg(target_os = "linux")]
 fn ffmpeg_format() -> &'static str {
     "v4l2"
@@ -319,11 +342,6 @@ fn ffmpeg_format() -> &'static str {
 #[cfg(target_os = "windows")]
 fn ffmpeg_format() -> &'static str {
     "dshow"
-}
-
-#[cfg(target_os = "macos")]
-fn get_input_device(device: &str) -> String {
-    device.strip_prefix("avf:").unwrap_or(device).to_string()
 }
 
 #[cfg(target_os = "linux")]

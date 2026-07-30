@@ -119,12 +119,18 @@ fn run_reader(opts: &Options) -> Result<(), CameraError> {
         (None, None) => "auto".to_string(),
     };
 
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+    {
+        let level = if debug || verbose >= 2 {
+            nativecam::tracing::Level::DEBUG
+        } else {
+            nativecam::tracing::Level::INFO
+        };
+        nativecam::diagnostics::install_default_logger_at(level);
+    }
+
     let cfg = {
-        let mut b = CameraConfig::builder()
-            .width(width)
-            .height(height)
-            .fps(fps)
-            .diagnostics(debug || verbose >= 2);
+        let mut b = CameraConfig::builder().width(width).height(height).fps(fps);
 
         if let Some(dev) = device.clone() {
             b = b.device(dev);

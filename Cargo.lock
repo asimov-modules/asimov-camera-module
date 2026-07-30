@@ -1441,6 +1441,8 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation",
  "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

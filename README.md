@@ -40,21 +40,21 @@ asimov-camera-reader
 **Enumerate cameras (text)**
 ```bash
 # Short summary (IDs + human names)
-asimov-camera-cataloger
+asimov-camera-lister
 
 # Verbose (descriptions, misc info, resolutions, frame rates)
-asimov-camera-cataloger -v
+asimov-camera-lister -v
 ```
 
 **Enumerate cameras (JSONL)**
 ```bash
 # JSONL with logical IDs and formats
-asimov-camera-cataloger --output jsonl
+asimov-camera-lister --output jsonl
 
 # Pipe into jq
-asimov-camera-cataloger --output jsonl | jq .
+asimov-camera-lister --output jsonl | jq .
 ```
-Then take the `id` from the cataloger output and plug it into the reader:
+Then take the `id` from the lister output and plug it into the reader:
 ```bash
 # Using a discovered device, e.g. "file:/dev/video2"
 asimov-camera-reader <device-id>
@@ -69,7 +69,7 @@ This module requires no configuration.
 ### Installed Binaries
 
 - `asimov-camera-reader` — streams camera frames as JSONL KNOW Image objects.
-- `asimov-camera-cataloger` — lists available camera devices and their supported formats.
+- `asimov-camera-lister` — lists available camera devices and their supported formats.
 
 ### `asimov-camera-reader`
 
@@ -123,10 +123,10 @@ asimov-camera-reader -DDD      # stricter
 > On some platforms (notably macOS), the actual capture rate is determined by the camera
 > and FFmpeg, and the output is throttled to the requested frequency.
 
-### `asimov-camera-cataloger`
+### `asimov-camera-lister`
 
 ```
-Usage: asimov-camera-cataloger [OPTIONS]
+Usage: asimov-camera-lister [OPTIONS]
 
 Options:
   -o, --output <FORMAT>  Output format [default: text] [possible values: text, jsonl]
@@ -139,14 +139,14 @@ Options:
 
 **Text output**
 ```
-asimov-camera-cataloger
+asimov-camera-lister
 # file:/dev/video0: Integrated Camera
 # file:/dev/video1: USB Camera
 ```
 
 **JSONL output**
 ```bash
-asimov-camera-cataloger --output jsonl | jq .
+asimov-camera-lister --output jsonl | jq .
 ```
 Each line is a single device:
 ```json

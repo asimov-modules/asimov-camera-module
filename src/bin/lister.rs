@@ -1,7 +1,7 @@
 // This is free and unencumbered software released into the public domain.
 
 #[cfg(not(feature = "std"))]
-compile_error!("asimov-camera-cataloger requires the 'std' feature");
+compile_error!("asimov-camera-lister requires the 'std' feature");
 
 use asimov_camera_module::{CameraError, DeviceKind};
 use asimov_module::SysexitsError::{self, *};
@@ -49,7 +49,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
     #[cfg(feature = "tracing")]
     asimov_module::init_tracing_subscriber(&options.flags).expect("failed to initialize logging");
 
-    let exit_code = match run_cataloger(&options) {
+    let exit_code = match run_lister(&options) {
         Ok(()) => EX_OK,
         Err(err) => handle_error(&err, &options.flags),
     };
@@ -57,7 +57,7 @@ pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
     Ok(exit_code)
 }
 
-fn run_cataloger(options: &Options) -> Result<(), CameraError> {
+fn run_lister(options: &Options) -> Result<(), CameraError> {
     if options.flags.debug || options.flags.verbose >= 1 {
         eprintln!("INFO: enumerating camera devices");
     }

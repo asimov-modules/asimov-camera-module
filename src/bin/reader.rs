@@ -1,0 +1,286 @@
+// This is free and unencumbered software released into the public domain.
+
+#[cfg(not(feature = "std"))]
+compile_error!("asimov-camera-reader requires the 'std' feature");
+
+use asimov_camera_module::{
+    CameraConfig, CameraError, DeviceInfo, DeviceKind, FrameRef, PixelFormat, default_device,
+    list_video_devices, open_camera,
+};
+use asimov_module::SysexitsError::{self, *};
+use clap::Parser;
+use clientele::StandardOptions;
+use image_hasher::{HashAlg, HasherConfig};
+use know::traits::ToJsonLd;
+
+use std::{
+    error::Error as StdError,
+    io::{self, Write},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Debug, Parser)]
+struct Options {
+    #[clap(flatten)]
+    flags: StandardOptions,
+
+    #[arg(long)]
+    device: Option<String>,
+
+    #[arg(short, long = "size", value_parser = parse_dimensions, default_value = "640x480")]
+    size: (u32, u32),
+
+    #[arg(short, long, value_parser = parse_frequency, default_value = "30")]
+    frequency: f64,
+
+    #[clap(short = 'D', long, action = clap::ArgAction::Count)]
+    debounce: u8,
+
+    #[arg(long)]
+    list_devices: bool,
+}
+
+pub fn main() -> Result<SysexitsError, Box<dyn StdError>> {
+    asimov_module::dotenv().ok();
+    let args = asimov_module::args_os()?;
+    let options = Options::parse_from(args);
+
+    if options.flags.version {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return Ok(EX_OK);
+    }
+
+    if options.flags.license {
+        print!("{}", include_str!("../../UNLICENSE"));
+        return Ok(EX_OK);
+    }
+
+    #[cfg(feature = "tracing")]
+    asimov_module::init_tracing_subscriber(&options.flags).expect("failed to initialize logging");
+
+    let exit_code = match run_reader(&options) {
+        Ok(()) => EX_OK,
+        Err(err) => {
+            eprintln!("ERROR: {err}");
+            EX_SOFTWARE
+        },
+    };
+
+    Ok(exit_code)
+}
+
+fn run_reader(opts: &Options) -> Result<(), CameraError> {
+    if opts.list_devices {
+        let mut devices = list_video_devices()?;
+        devices.sort_by(|a, b| a.id().cmp(b.id()).then_with(|| a.name().cmp(b.name())));
+        for d in devices {
+            let _kind: DeviceKind = d.kind();
+            println!("{}: {}", d.id(), d.name());
+        }
+        return Ok(());
+    }
+
+    let verbose: u8 = opts.flags.verbose;
+    let debug: bool = opts.flags.debug;
+
+    let quit = Arc::new(AtomicBool::new(false));
+    {
+        let quit2 = Arc::clone(&quit);
+        ctrlc::set_handler(move || {
+            quit2.store(true, Ordering::SeqCst);
+        })
+        .map_err(|e| CameraError::other(format!("{e}")))?;
+    }
+
+    let (width, height) = opts.size;
+    let fps = opts.frequency.max(0.1);
+    let min_interval = Duration::from_secs_f64(1.0 / fps);
+
+    let device = resolve_device(opts.device.as_deref())?;
+
+    let device_id_cb: String = match (opts.device.as_deref(), device.as_ref()) {
+        (Some(raw), _) => raw.trim().to_string(),
+        (None, Some(dev)) => dev.id().to_string(),
+        (None, None) => "auto".to_string(),
+    };
+
+    let cfg = {
+        let mut b = CameraConfig::builder()
+            .width(width)
+            .height(height)
+            .fps(fps)
+            .diagnostics(debug || verbose >= 2);
+
+        if let Some(dev) = device.clone() {
+            b = b.device(dev);
+        }
+
+        b.build()?
+    };
+
+    let mut cam = open_camera(cfg)?;
+
+    if debug || verbose >= 1 {
+        let label = opts
+            .device
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| device_id_cb.clone());
+
+        eprintln!("INFO: opening camera device={label}");
+    }
+
+    cam.start()?;
+    let rx = cam.read_frames()?;
+
+    let last_emit = Arc::new(Mutex::new(Instant::now()));
+    let last_hash: Arc<Mutex<Option<image_hasher::ImageHash>>> = Arc::new(Mutex::new(None));
+    let hasher =
+        (opts.debounce > 0).then(|| HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher());
+
+    while !quit.load(Ordering::SeqCst) {
+        let frame: FrameRef = match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(f) => f,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        if quit.load(Ordering::SeqCst) {
+            break;
+        }
+
+        {
+            let mut guard = last_emit.lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            if now.duration_since(*guard) < min_interval {
+                continue;
+            }
+            *guard = now;
+        }
+
+        if let Some(ref hasher) = hasher {
+            if frame.pixel_format == PixelFormat::Rgb8 {
+                if let Some(img_buffer) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
+                    frame.width,
+                    frame.height,
+                    frame.data.to_vec(),
+                ) {
+                    let img_data = image::DynamicImage::ImageRgb8(img_buffer);
+                    let hash = hasher.hash_image(&img_data);
+
+                    let mut prev = last_hash.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(ref mut prev_hash) = *prev {
+                        if hash.dist(prev_hash) < opts.debounce as u32 {
+                            continue;
+                        }
+                        *prev_hash = hash;
+                    } else {
+                        *prev = Some(hash);
+                    }
+                }
+            }
+        }
+
+        let ts_ns: u64 = frame.timestamp_ns.unwrap_or(0).max({
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        });
+
+        let img = know::classes::Image {
+            id: Some(format!("{}#{}", device_id_cb, ts_ns)),
+            width: Some(frame.width as _),
+            height: Some(frame.height as _),
+            data: frame.data.to_vec(),
+            source: Some(device_id_cb.clone()),
+        };
+
+        let json = match img.to_jsonld() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let mut out = io::stdout().lock();
+        if let Err(err) = writeln!(&mut out, "{json}") {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                quit.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let _ = cam.stop();
+    Ok(())
+}
+
+fn resolve_device(id_opt: Option<&str>) -> Result<Option<DeviceInfo>, CameraError> {
+    let id = id_opt.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    if id.is_none() {
+        return Ok(default_device()?);
+    }
+
+    let want = id.unwrap();
+    let devices = list_video_devices()?;
+    if let Some(d) = devices.into_iter().find(|d| d.id() == want) {
+        return Ok(Some(d));
+    }
+
+    Err(CameraError::invalid_config(format!(
+        "unknown device id '{want}'; run with --list-devices"
+    )))
+}
+
+fn parse_dimensions(s: &str) -> Result<(u32, u32), String> {
+    let s = s.trim().replace('×', "x");
+    let parts: Vec<&str> = s.split('x').map(|t| t.trim()).collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(format!("Invalid format '{s}'. Use WxH (e.g., 1920x1080)"));
+    }
+
+    let width: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid width: {}", parts[0]))?;
+    let height: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid height: {}", parts[1]))?;
+
+    if !(160..=7680).contains(&width) {
+        return Err(format!(
+            "Width {width} is out of reasonable range (160-7680)"
+        ));
+    }
+    if !(120..=4320).contains(&height) {
+        return Err(format!(
+            "Height {height} is out of reasonable range (120-4320)"
+        ));
+    }
+
+    Ok((width, height))
+}
+
+fn parse_frequency(s: &str) -> Result<f64, String> {
+    let freq: f64 = s.parse().map_err(|_| format!("Invalid frequency: {s}"))?;
+
+    if freq <= 0.0 {
+        return Err("Frequency must be positive".to_string());
+    }
+    if freq > 240.0 {
+        return Err(format!(
+            "Frequency {freq} Hz exceeds reasonable maximum (240 Hz)"
+        ));
+    }
+    if freq < 0.1 {
+        return Err(format!(
+            "Frequency {freq} Hz is below reasonable minimum (0.1 Hz)"
+        ));
+    }
+
+    Ok(freq)
+}

@@ -1,0 +1,114 @@
+// This is free and unencumbered software released into the public domain.
+
+use std::{error::Error as StdError, sync::Arc};
+
+pub type DynError = Arc<dyn StdError + Send + Sync + 'static>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CameraErrorKind {
+    NoDriver,
+    NotApplicable,
+    NoCamera,
+    NotConfigured,
+    Unsupported,
+    InvalidConfig,
+    Closed,
+    Driver,
+    Other,
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum CameraError {
+    #[error("no camera driver available")]
+    NoDriver,
+
+    #[error("driver not applicable")]
+    NotApplicable,
+
+    #[error("no camera device available")]
+    NoCamera,
+
+    #[error("camera not configured")]
+    NotConfigured,
+
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+
+    #[error("camera is closed")]
+    Closed,
+
+    #[error("{context}: {source}")]
+    Driver {
+        context: &'static str,
+        #[source]
+        source: DynError,
+    },
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl CameraError {
+    #[inline]
+    pub const fn kind(&self) -> CameraErrorKind {
+        match self {
+            Self::NoDriver => CameraErrorKind::NoDriver,
+            Self::NotApplicable => CameraErrorKind::NotApplicable,
+            Self::NoCamera => CameraErrorKind::NoCamera,
+            Self::NotConfigured => CameraErrorKind::NotConfigured,
+            Self::Unsupported(_) => CameraErrorKind::Unsupported,
+            Self::InvalidConfig(_) => CameraErrorKind::InvalidConfig,
+            Self::Closed => CameraErrorKind::Closed,
+            Self::Driver { .. } => CameraErrorKind::Driver,
+            Self::Other(_) => CameraErrorKind::Other,
+        }
+    }
+
+    #[inline]
+    pub fn driver(context: &'static str, source: impl StdError + Send + Sync + 'static) -> Self {
+        Self::Driver {
+            context,
+            source: Arc::new(source),
+        }
+    }
+
+    #[inline]
+    pub fn unsupported(msg: impl Into<String>) -> Self {
+        Self::Unsupported(msg.into())
+    }
+
+    #[inline]
+    pub fn invalid_config(msg: impl Into<String>) -> Self {
+        Self::InvalidConfig(msg.into())
+    }
+
+    #[inline]
+    pub fn other(msg: impl Into<String>) -> Self {
+        Self::Other(msg.into())
+    }
+
+    #[inline]
+    pub const fn is_not_applicable(&self) -> bool {
+        matches!(self, Self::NotApplicable)
+    }
+
+    #[inline]
+    pub const fn is_expected(&self) -> bool {
+        matches!(
+            self,
+            Self::NotApplicable | Self::NoDriver | Self::NoCamera | Self::Closed
+        )
+    }
+}
+
+impl From<DynError> for CameraError {
+    fn from(e: DynError) -> Self {
+        CameraError::Driver {
+            context: "error",
+            source: e,
+        }
+    }
+}

@@ -86,6 +86,6 @@ path = "src/bin/reader.rs"
 required-features = ["cli"]
 
 [[bin]]
-name = "asimov-camera-cataloger"
-path = "src/bin/cataloger.rs"
+name = "asimov-camera-lister"
+path = "src/bin/lister.rs"
 required-features = ["cli"]

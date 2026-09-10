@@ -11,7 +11,7 @@ links:
 provides:
   programs:
     - asimov-camera-reader
-    - asimov-camera-cataloger
+    - asimov-camera-lister
 
 handles:
   url_patterns:
